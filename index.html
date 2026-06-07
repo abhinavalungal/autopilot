@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Maritime Autopilot v3.7 — Setup</title>
+    <title id="page-title">Maritime Autopilot v3.7 — Setup</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Syne:wght@400;700;800&display=swap" rel="stylesheet">
     <style>
@@ -128,6 +128,39 @@
             max-width: 540px;
             overflow: hidden;
         }
+
+        /* === VERSION STATUS BAR === */
+        .version-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(0,0,0,0.2);
+            border-bottom: 1px solid var(--border);
+            padding: 8px 20px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            color: var(--muted);
+        }
+        .version-bar .ver-label { opacity: 0.6; margin-right: 6px; }
+        .version-bar strong { color: var(--lime); }
+        .ver-source-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            background: rgba(255,255,255,0.04);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 2px 10px;
+            font-size: 10px;
+        }
+        .ver-source-dot {
+            width: 5px; height: 5px;
+            border-radius: 50%;
+            background: var(--muted);
+        }
+        .ver-source-dot.live  { background: var(--lime); box-shadow: 0 0 6px var(--lime); }
+        .ver-source-dot.cache { background: var(--amber); }
+        .ver-source-dot.bundled { background: var(--muted); }
 
         .card-inner {
             padding: 36px;
@@ -319,9 +352,10 @@
             opacity: 0;
             transition: transform 0.3s cubic-bezier(0.34,1.56,0.64,1), opacity 0.3s;
             z-index: 1000;
+            max-width: 360px;
         }
         .toast.show { transform: translateY(0); opacity: 1; }
-        .toast-dot { width: 8px; height: 8px; background: var(--lime); border-radius: 50%; box-shadow: 0 0 8px var(--lime); }
+        .toast-dot { flex-shrink: 0; width: 8px; height: 8px; background: var(--lime); border-radius: 50%; box-shadow: 0 0 8px var(--lime); }
 
         /* === FOOTER === */
         .footer {
@@ -331,26 +365,480 @@
             color: rgba(143,163,184,0.4);
             text-align: center;
             letter-spacing: 0.05em;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 12px;
+        }
+        .admin-trigger-link {
+            background: none;
+            border: none;
+            color: rgba(143,163,184,0.25);
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            cursor: pointer;
+            letter-spacing: 0.05em;
+            padding: 0;
+            transition: color 0.2s;
+        }
+        .admin-trigger-link:hover { color: rgba(143,163,184,0.7); }
+
+        /* ============================================================
+           ADMIN PANEL MODAL
+        ============================================================ */
+        .admin-overlay {
+            display: none;
+            position: fixed; inset: 0; z-index: 9000;
+            background: rgba(5, 10, 20, 0.85);
+            backdrop-filter: blur(6px);
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            animation: overlayFadeIn 0.2s ease;
+        }
+        .admin-overlay.open { display: flex; }
+        @keyframes overlayFadeIn {
+            from { opacity: 0; }
+            to   { opacity: 1; }
+        }
+
+        .admin-panel {
+            background: var(--ocean);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 20px;
+            width: 100%;
+            max-width: 560px;
+            max-height: 90vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+            animation: panelSlideUp 0.25s cubic-bezier(0.34,1.56,0.64,1);
+        }
+        @keyframes panelSlideUp {
+            from { transform: translateY(30px); opacity: 0; }
+            to   { transform: translateY(0);    opacity: 1; }
+        }
+
+        .admin-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 20px 24px 16px;
+            border-bottom: 1px solid var(--border);
+            flex-shrink: 0;
+        }
+        .admin-header-left {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .admin-header-icon {
+            width: 32px; height: 32px;
+            background: rgba(14,124,107,0.2);
+            border: 1px solid rgba(14,124,107,0.4);
+            border-radius: 8px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 14px;
+        }
+        .admin-title {
+            font-size: 15px;
+            font-weight: 700;
+            color: var(--white);
+        }
+        .admin-subtitle {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 10px;
+            color: var(--muted);
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+        }
+        .admin-close {
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--muted);
+            width: 32px; height: 32px;
+            cursor: pointer;
+            font-size: 18px;
+            display: flex; align-items: center; justify-content: center;
+            transition: background 0.2s, color 0.2s;
+        }
+        .admin-close:hover { background: rgba(231,76,60,0.15); color: var(--red); border-color: rgba(231,76,60,0.3); }
+
+        .admin-body {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        /* === AUTH FORM === */
+        .admin-auth {
+            text-align: center;
+            padding: 8px 0;
+        }
+        .admin-auth-icon {
+            font-size: 40px;
+            margin-bottom: 16px;
+        }
+        .admin-auth h3 {
+            font-size: 18px;
+            font-weight: 700;
+            margin-bottom: 6px;
+        }
+        .admin-auth p {
+            font-size: 13px;
+            color: var(--muted);
+            margin-bottom: 24px;
+        }
+
+        /* === FORM ELEMENTS === */
+        .admin-form-group {
+            margin-bottom: 16px;
+        }
+        .admin-form-group label {
+            display: block;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 6px;
+        }
+        .admin-input {
+            width: 100%;
+            background: rgba(0,0,0,0.3);
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 8px;
+            padding: 11px 14px;
+            color: var(--white);
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .admin-input:focus { border-color: rgba(14,124,107,0.6); }
+        .admin-input::placeholder { color: rgba(143,163,184,0.4); }
+        .admin-textarea {
+            resize: vertical;
+            min-height: 80px;
+            line-height: 1.5;
+            font-size: 12px;
+        }
+
+        /* === BUTTONS === */
+        .admin-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border-radius: 8px;
+            padding: 11px 20px;
+            font-size: 13px;
+            font-weight: 700;
+            font-family: 'Syne', sans-serif;
+            cursor: pointer;
+            transition: all 0.15s;
+            border: none;
+        }
+        .admin-btn-primary {
+            background: linear-gradient(135deg, #0e7c6b, #2ecc71);
+            color: white;
+            width: 100%;
+            margin-top: 4px;
+            font-size: 14px;
+            padding: 13px 20px;
+        }
+        .admin-btn-primary:hover { filter: brightness(1.1); transform: translateY(-1px); }
+        .admin-btn-primary:active { transform: translateY(0); }
+        .admin-btn-outline {
+            background: rgba(255,255,255,0.04);
+            border: 1px solid rgba(255,255,255,0.1);
+            color: var(--white);
+        }
+        .admin-btn-outline:hover { background: rgba(255,255,255,0.08); }
+        .admin-btn-sm {
+            padding: 7px 12px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        /* === TABS === */
+        .admin-tabs {
+            display: flex;
+            gap: 4px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 10px;
+            padding: 4px;
+            margin-bottom: 20px;
+        }
+        .admin-tab {
+            flex: 1;
+            background: none;
+            border: none;
+            border-radius: 7px;
+            padding: 8px 4px;
+            font-size: 12px;
+            font-weight: 700;
+            font-family: 'Syne', sans-serif;
+            color: var(--muted);
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .admin-tab.active {
+            background: rgba(14,124,107,0.25);
+            color: var(--lime);
+            border: 1px solid rgba(14,124,107,0.3);
+        }
+        .admin-tab:hover:not(.active) { color: var(--white); }
+
+        /* === CURRENT VERSION CHIP === */
+        .admin-current-ver {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            background: rgba(0,0,0,0.2);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px 16px;
+            margin-bottom: 20px;
+        }
+        .admin-label {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+        }
+        .admin-ver-pill {
+            background: rgba(14,124,107,0.2);
+            border: 1px solid rgba(14,124,107,0.4);
+            border-radius: 20px;
+            padding: 3px 12px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: var(--lime);
+            font-weight: 600;
+        }
+
+        /* === FILE UPLOAD ZONE === */
+        .upload-drop-zone {
+            border: 2px dashed rgba(14,124,107,0.3);
+            border-radius: 10px;
+            padding: 24px 16px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: rgba(14,124,107,0.04);
+        }
+        .upload-drop-zone:hover, .upload-drop-zone.dragging {
+            border-color: rgba(46,204,113,0.6);
+            background: rgba(14,124,107,0.1);
+        }
+        .upload-drop-zone.loaded {
+            border-color: rgba(46,204,113,0.5);
+            border-style: solid;
+            background: rgba(46,204,113,0.06);
+        }
+        .upload-icon { font-size: 28px; margin-bottom: 8px; }
+        .upload-filename {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 12px;
+            color: var(--white);
+            margin-bottom: 4px;
+        }
+        .upload-hint {
+            font-size: 11px;
+            color: rgba(143,163,184,0.5);
+        }
+
+        /* === DEPLOY BOX === */
+        .deploy-box {
+            background: rgba(46,204,113,0.06);
+            border: 1px solid rgba(46,204,113,0.2);
+            border-radius: 10px;
+            padding: 18px;
+            margin-top: 16px;
+        }
+        .deploy-title {
+            font-weight: 700;
+            font-size: 14px;
+            color: var(--lime);
+            margin-bottom: 8px;
+        }
+        .deploy-box p {
+            font-size: 13px;
+            color: var(--muted);
+            line-height: 1.55;
+            margin-bottom: 12px;
+        }
+        .deploy-box p strong { color: var(--white); }
+        .deploy-steps {
+            padding-left: 18px;
+            margin-bottom: 14px;
+        }
+        .deploy-steps li {
+            font-size: 13px;
+            color: var(--muted);
+            line-height: 1.7;
+        }
+        .deploy-steps li strong { color: var(--white); }
+        .deploy-steps code {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            background: rgba(255,255,255,0.07);
+            padding: 1px 6px;
+            border-radius: 4px;
+            color: var(--amber);
+        }
+
+        /* === VERSION HISTORY === */
+        .history-row {
+            display: flex;
+            align-items: flex-start;
+            gap: 14px;
+            padding: 14px 0;
+            border-bottom: 1px solid var(--border);
+        }
+        .history-row:last-child { border-bottom: none; }
+        .history-row-current .history-ver { color: var(--lime); }
+        .history-ver {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--muted);
+            flex-shrink: 0;
+            width: 44px;
+            padding-top: 2px;
+        }
+        .history-meta { flex: 1; }
+        .history-notes {
+            font-size: 13px;
+            color: var(--white);
+            line-height: 1.4;
+            margin-bottom: 4px;
+        }
+        .history-date {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 10px;
+            color: rgba(143,163,184,0.5);
+        }
+        .history-badge {
+            flex-shrink: 0;
+            background: rgba(46,204,113,0.15);
+            border: 1px solid rgba(46,204,113,0.3);
+            border-radius: 20px;
+            padding: 2px 10px;
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 9px;
+            color: var(--lime);
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            margin-top: 3px;
+        }
+
+        /* === EXPORT/IMPORT TAB === */
+        .export-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 16px;
+        }
+        .export-row .admin-btn { flex: 1; min-width: 140px; }
+        .admin-note {
+            background: rgba(245,166,35,0.06);
+            border: 1px solid rgba(245,166,35,0.2);
+            border-radius: 8px;
+            padding: 12px 14px;
+            font-size: 12px;
+            color: var(--muted);
+            line-height: 1.55;
+        }
+        .admin-note strong { color: var(--amber); }
+        .admin-note code {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 11px;
+            background: rgba(255,255,255,0.06);
+            padding: 1px 5px;
+            border-radius: 4px;
+            color: var(--amber);
+        }
+
+        /* === STATUS MESSAGES === */
+        .admin-error {
+            background: rgba(231,76,60,0.1);
+            border: 1px solid rgba(231,76,60,0.3);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #e57373;
+            margin-top: 10px;
+        }
+        .admin-success {
+            background: rgba(46,204,113,0.08);
+            border: 1px solid rgba(46,204,113,0.25);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: var(--lime);
+        }
+        .admin-empty {
+            text-align: center;
+            color: var(--muted);
+            font-size: 13px;
+            padding: 32px 0;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+        .admin-desc {
+            font-size: 13px;
+            color: var(--muted);
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+
+        /* Keyboard shortcut hint */
+        .kbd-hint {
+            font-family: 'IBM Plex Mono', monospace;
+            font-size: 10px;
+            color: rgba(143,163,184,0.3);
+            margin-left: 4px;
         }
     </style>
 </head>
 <body>
 
+<!-- ============================================================
+     MAIN PAGE
+============================================================ -->
 <div class="page">
     <div class="header">
-        <div class="badge">GeoEmissions</div>
-        <h1>Maritime Report<br><span>Autopilot</span> v3.7</h1>
+        <div class="badge">GeoEmissions · CII Intelligence</div>
+        <h1>Maritime Report<br><span>Autopilot</span> <span class="ver-dynamic">v3.7</span></h1>
         <p class="subtitle">One-time browser setup. No extensions, no installs — just drag and you're ready.</p>
     </div>
 
     <div class="card">
+
+        <!-- VERSION STATUS BAR -->
+        <div class="version-bar">
+            <div id="version-indicator">
+                <span class="ver-label">Active:</span>
+                <strong class="ver-dynamic">v3.7</strong>
+            </div>
+            <div class="ver-source-pill">
+                <div class="ver-source-dot bundled" id="source-dot"></div>
+                <span id="source-label">Bundled</span>
+            </div>
+        </div>
+
         <div class="card-inner">
 
             <!-- DRAG ZONE -->
             <div class="drag-zone">
                 <div class="drag-hint">Drag to your bookmarks bar</div>
                 <a id="autopilot-bookmarklet" class="bookmarklet-btn" href="#">
-                    🚢 Autopilot v3.0
+                    🚢 Autopilot <span class="ver-dynamic">v3.7</span>
                 </a>
                 <div class="drag-arrow">
                     <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -388,50 +876,559 @@
         </div>
     </div>
 
-    <div class="footer">Setup once · Works on every visit · No extensions required</div>
+    <div class="footer">
+        <span>Setup once · Works on every visit · No extensions required</span>
+        <span>·</span>
+        <button class="admin-trigger-link" onclick="openAdminPanel()" title="Ctrl+Shift+A">Admin <span class="kbd-hint">⌃⇧A</span></button>
+    </div>
 </div>
 
 <!-- TOAST -->
 <div class="toast" id="toast">
     <div class="toast-dot"></div>
-    Copied to clipboard!
+    <span id="toast-text">Copied to clipboard!</span>
+</div>
+
+<!-- ============================================================
+     ADMIN PANEL MODAL
+============================================================ -->
+<div class="admin-overlay" id="admin-modal" onclick="handleOverlayClick(event)">
+    <div class="admin-panel">
+        <div class="admin-header">
+            <div class="admin-header-left">
+                <div class="admin-header-icon">⚙</div>
+                <div>
+                    <div class="admin-title">Version Management</div>
+                    <div class="admin-subtitle">GeoEmissions · Autopilot Distribution</div>
+                </div>
+            </div>
+            <button class="admin-close" onclick="closeAdminPanel()">×</button>
+        </div>
+        <div class="admin-body" id="admin-content">
+            <!-- Rendered by JS -->
+        </div>
+    </div>
 </div>
 
 <script>
-const AUTOPILOT_CODE = "const CONFIG = { REQUIRE_BUNKER_DATA: true, STEAMING_HOURS_MIN: 16, STEAMING_HOURS_MAX: 26, ADJ_TOLERANCE: 0.01, SLEEP_POLL_MS: 500, SLEEP_POST_CLICK_MS: 1200, DOM_STABLE_HEADSTART_MS: 400, SLEEP_POST_NAVIGATE_MS: 3500, SLEEP_INIT_MS: 500, DOM_STABLE_TIMEOUT_MS: 3000, DOM_STABLE_DEBOUNCE_MS: 200, }; const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)); window.autopilotRunning = false; function getAllContexts() { const contexts = [document]; const iframes = document.querySelectorAll('iframe'); for (const iframe of iframes) { try { const doc = iframe.contentDocument || iframe.contentWindow.document; if (doc) contexts.push(doc); } catch(_) {} } return contexts; } function queryAllContexts(selector) { let elements = []; for (const ctx of getAllContexts()) { try { if (ctx) elements = elements.concat(Array.from(ctx.querySelectorAll(selector))); } catch(_) {} } return elements; } function waitForDOMStable(timeoutMs = CONFIG.DOM_STABLE_TIMEOUT_MS, debounceMs = CONFIG.DOM_STABLE_DEBOUNCE_MS) { return new Promise((resolve) => { let debounceTimer = null; const hardTimeout = setTimeout(() => { resolve(); }, timeoutMs); const observer = new MutationObserver(() => { clearTimeout(debounceTimer); debounceTimer = setTimeout(() => { observer.disconnect(); clearTimeout(hardTimeout); resolve(); }, debounceMs); }); getAllContexts().forEach(ctx => { try { if (ctx && ctx.body) { observer.observe(ctx.body, { childList: true, subtree: true, attributes: true }); } } catch(_) {} }); debounceTimer = setTimeout(() => { observer.disconnect(); clearTimeout(hardTimeout); resolve(); }, debounceMs); }); } function findSteamingHoursInput() { for (const ctx of getAllContexts()) { if (!ctx) continue; let input = ctx.querySelector('#steaminghours') || ctx.querySelector('[name*=\"steaming\" i]') || ctx.querySelector('[id*=\"steaming\" i]'); if (input) return input; const elements = Array.from(ctx.querySelectorAll('label, span, div, th')); for (const el of elements) { const txt = (el.innerText || \"\").toLowerCase(); if (txt === 'steaming hours' || txt === 'steaming hrs' || txt.includes('steaming hours')) { const parent = el.parentElement; if (parent) { const adjInput = parent.querySelector('input'); if (adjInput) return adjInput; } } } } return null; } function locateTrueBunkerContainer() { for (const ctx of getAllContexts()) { if (!ctx) continue; const fieldsets = ctx.querySelectorAll('fieldset'); for (const fs of fieldsets) { const legend = fs.querySelector('legend'); if (legend) { const legendText = legend.innerText.trim().toUpperCase(); if (legendText === 'BUNKER ROB') { return fs; } } } } const badges = queryAllContexts('.p-panel-header, .p-component-header, legend, .bunker-header'); for (const badge of badges) { const text = (badge.innerText || \"\").toUpperCase(); if (text === 'BUNKER ROB' || text === 'BUNKER') { let current = badge.parentElement; while (current && current !== current.ownerDocument.body) { if (current.tagName === 'FIELDSET' || current.classList.contains('p-component') || current.classList.contains('card')) { return current; } current = current.parentElement; } } } return null; } function locateBunkerRows() { const bunkerContainer = locateTrueBunkerContainer(); if (!bunkerContainer) return []; let rows = Array.from(bunkerContainer.querySelectorAll('tbody tr, .p-datatable-tbody tr')); if (rows.length === 0) rows = Array.from(bunkerContainer.querySelectorAll('tr')); return rows.filter(row => { if (row.closest('thead') || row.classList.contains('p-datatable-thead') || row.querySelector('th')) { return false; } const inputs = Array.from(row.querySelectorAll('input')).filter(inp => { if (inp.type === 'hidden' || inp.disabled) return false; const style = window.getComputedStyle(inp); return style.display !== 'none' && style.visibility !== 'hidden'; }); return inputs.length >= 2; }); } async function validateCurrentReport() { clearStatus(); setStatus(\"Initiating Smart Sandbox Scan...\", \"info\"); await sleep(CONFIG.SLEEP_INIT_MS); let isValid = true; const errors = []; const steamingHoursInput = findSteamingHoursInput(); if (steamingHoursInput && steamingHoursInput.value.trim() !== \"\") { const hours = parseFloat(steamingHoursInput.value); if (isNaN(hours) || hours < CONFIG.STEAMING_HOURS_MIN || hours > CONFIG.STEAMING_HOURS_MAX) { errors.push(`Steaming hours (${hours}) outside bounds.`); steamingHoursInput.style.border = \"3px solid #f44336\"; isValid = false; setStatus(`\u274c Steaming hrs failed: ${hours}`, \"error\"); } else { steamingHoursInput.style.border = \"1px solid green\"; setStatus(`\u2705 Steaming hrs OK: ${hours}`, \"success\"); } } else { setStatus(\"\u2139\ufe0f Steaming Hours field unpopulated or not applicable to this layout index.\", \"info\"); } setStatus(\"Targeting isolated Bunker ROB grid...\", \"info\"); let bunkerRows = locateBunkerRows(); if (bunkerRows.length === 0) { setStatus(\"\u26a0\ufe0f No active Bunker ROB records isolated inside this frame context.\", \"warning\"); return isValid; } let validationFailTriggered = false; bunkerRows.forEach((row, index) => { const cells = Array.from(row.querySelectorAll('td')); let fuelTypeLabel = (cells[0] && cells[0].innerText.trim().split('\\n')[0]) || `Line ${index + 1}`; let lastRobInput = null; let robStartInput = null; cells.forEach(cell => { const titleEl = cell.querySelector('.p-column-title'); const titleText = titleEl ? titleEl.innerText.toLowerCase().trim() : ''; const input = cell.querySelector('input'); if (!input) return; if (titleText.includes('last rob') || titleText.includes('previous')) { lastRobInput = input; } else if (titleText.includes('rob start') || titleText.includes('start')) { robStartInput = input; } }); if (!lastRobInput || !robStartInput) { const rowInputs = cells.map(c => c.querySelector('input')).filter(inp => inp && inp.type !== 'hidden' && !inp.disabled); if (rowInputs.length >= 2) { lastRobInput = rowInputs[0]; robStartInput = rowInputs[1]; } } if (!lastRobInput || !robStartInput) return; const lastRobVal = parseFloat(lastRobInput.value.replace(/,/g, '').trim()); const robStartVal = parseFloat(robStartInput.value.replace(/,/g, '').trim()); const safeLast = isNaN(lastRobVal) ? 0 : lastRobVal; const safeStart = isNaN(robStartVal) ? 0 : robStartVal; if (lastRobInput.value.trim() === \"\" && robStartInput.value.trim() === \"\") return; if (Math.abs(safeLast - safeStart) > CONFIG.ADJ_TOLERANCE) { errors.push(`[${fuelTypeLabel}] Mismatch: Last (${safeLast}) != Start (${safeStart})`); lastRobInput.style.cssText = \"border: 3px solid red !important; background-color: #ffebee !important;\"; robStartInput.style.cssText = \"border: 3px solid red !important; background-color: #ffebee !important;\"; isValid = false; validationFailTriggered = true; setStatus(`\u274c Mismatch [${fuelTypeLabel}]: Last (${safeLast}) \u2260 Start (${safeStart})`, \"error\"); } else { lastRobInput.style.cssText = \"border: 1px solid green !important; background-color: #e8f5e9 !important;\"; robStartInput.style.cssText = \"border: 1px solid green !important; background-color: #e8f5e9 !important;\"; } }); if (bunkerRows.length > 0 && !validationFailTriggered) { setStatus(`\u2705 Confirmed perfect data alignment inside Bunker ROB grid.`, \"success\"); } await sleep(CONFIG.SLEEP_POLL_MS); if (!isValid) { setStatus(`\ud83d\uded1 LOCKOUT: Real data error caught in Bunker ROB panel. Autopilot halted.`, \"error\"); } else { setStatus(\"All system safety checks cleared.\", \"success\"); } return isValid; } async function approveReport() { setStatus(\"Scanning interface for submission buttons...\", \"info\"); let approveBtn = queryAllContexts('button[label=\"Approve\"], [appconfirmation][label=\"Approve\"], .p-button[label=\"Approve\"]')[0]; if (!approveBtn) { approveBtn = queryAllContexts('button, .p-button, [role=\"button\"]').find(el => { const label = (el.getAttribute('label') || \"\").toLowerCase(); return label === 'approve' || label.includes('approve'); }); } if (!approveBtn) { let textCheck = \"\"; getAllContexts().forEach(ctx => { if (ctx && ctx.body) textCheck += (ctx.body.innerText || \"\"); }); if (textCheck.includes(\"Approved\") && (textCheck.includes(\"Re Ingest\") || textCheck.includes(\"Resubmit\"))) { setStatus(\"\u26a0\ufe0f File is already approved. Proceeding to skip forward...\", \"warning\"); return \"skipped\"; } setStatus(\"\u274c Submission button context link unreadable.\", \"error\"); return false; } approveBtn.click(); await sleep(CONFIG.SLEEP_POST_CLICK_MS); setStatus(\"Confirming report verification dialogue...\", \"info\"); let yesBtn = queryAllContexts('.p-confirm-dialog-accept, button[label=\"Yes\"]')[0]; if (!yesBtn) { yesBtn = queryAllContexts('button, span, div, .p-button').find(el => { const text = (el.innerText || el.textContent || \"\").trim().toLowerCase(); const label = (el.getAttribute('label') || \"\").toLowerCase(); return text === 'yes' || label === 'yes' || text === 'confirm' || text === 'ok'; }); } if (!yesBtn) { setStatus(\"\u274c Modal submission dialogue confirmation button missing.\", \"error\"); return false; } yesBtn.click(); setStatus(\"\u2705 Submission confirmation completed.\", \"success\"); await sleep(CONFIG.DOM_STABLE_HEADSTART_MS); await waitForDOMStable(); return true; } async function goToNextPendingReport() { setStatus(\"Analyzing sidebar tracker matrix...\", \"info\"); const sidebarCards = queryAllContexts('.card, div[class*=\"card\"]') .filter(card => { const text = card.innerText || \"\"; return text.includes(\"Report\") || text.includes(\"Notice\"); }); const pendingCards = sidebarCards.filter(card => { const bgColor = card.style.backgroundColor || window.getComputedStyle(card).backgroundColor; return bgColor === 'rgb(255, 255, 255)' || bgColor === 'rgba(0, 0, 0, 0)' || bgColor === 'transparent'; }); const nextPendingCard = pendingCards[pendingCards.length - 1]; if (nextPendingCard) { setStatus(\"\u27a1\ufe0f Transitioning interface context to next data index line...\", \"success\"); nextPendingCard.click(); await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS); return true; } else { setStatus(\"\ud83c\udf89 Queue cleared successfully with clean data locks!\", \"success\"); return false; } } async function runAutopilot() { try { while (window.autopilotRunning) { const isValid = await validateCurrentReport(); if (!isValid) { window.autopilotRunning = false; updateUIButton(); break; } const approved = await approveReport(); if (approved === false) { window.autopilotRunning = false; updateUIButton(); break; } const hasMoreReports = await goToNextPendingReport(); if (!hasMoreReports) { window.autopilotRunning = false; updateUIButton(); break; } } } catch (err) { window.autopilotRunning = false; updateUIButton(); setStatus(`\ud83d\udca5 Operational Exception: ${err.message}`, \"error\"); } } function injectControlPanel() { document.getElementById(\"autopilot-btn\")?.remove(); document.getElementById(\"autopilot-status\")?.remove(); const statusBox = document.createElement('div'); statusBox.id = \"autopilot-status\"; statusBox.style.cssText = ` position: fixed; bottom: 85px; left: 20px; z-index: 99999; padding: 12px; font-size: 13px; font-family: monospace; background-color: rgba(10, 11, 15, 0.98); color: #fff; border: 1px solid #444; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); display: none; min-width: 320px; max-height: 220px; overflow-y: auto; `; document.body.appendChild(statusBox); const btn = document.createElement('button'); btn.id = \"autopilot-btn\"; btn.innerText = \"\u25b6 Start Autopilot (v3.7)\"; btn.style.cssText = ` position: fixed; bottom: 20px; left: 20px; z-index: 99999; padding: 15px 25px; font-size: 16px; font-weight: bold; background-color: #2e7d32; color: white; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5); `; btn.addEventListener('click', () => { window.autopilotRunning = !window.autopilotRunning; updateUIButton(); if (window.autopilotRunning) { document.getElementById(\"autopilot-status\").style.display = \"block\"; runAutopilot(); } else { setStatus(\"\u23f9 Interrupted execution chain manually.\", \"warning\"); } }); document.body.appendChild(btn); } function setStatus(message, type = 'info') { const box = document.getElementById(\"autopilot-status\"); if (!box) return; const colorMap = { success: \"#81c784\", error: \"#e57373\", warning: \"#fff176\" }; const color = colorMap[type] || \"#ffffff\"; const line = document.createElement('div'); line.style.cssText = `color: ${color}; margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px;`; line.innerText = message; box.appendChild(line); box.scrollTop = box.scrollHeight; } function clearStatus() { const box = document.getElementById(\"autopilot-status\"); if (box) box.innerHTML = \"<div style='color:#888; margin-bottom:8px; font-weight:bold;'>\ud83e\udd16 SYSTEM ACTIVE LOG (v3.7):</div>\"; } function updateUIButton() { const btn = document.getElementById(\"autopilot-btn\"); if (!btn) return; if (window.autopilotRunning) { btn.innerText = \"\u23f9 STOP Autopilot\"; btn.style.backgroundColor = \"#c62828\"; } else { btn.innerText = \"\u25b6 Start Autopilot (v3.o))\"; btn.style.backgroundColor = \"#2e7d32\"; } } injectControlPanel();";
+// ============================================================
+//  CONFIG — adjust these for your deployment
+// ============================================================
 
-window.addEventListener('DOMContentLoaded', () => {
-    const payload = 'javascript:(function(){' + AUTOPILOT_CODE + '})();';
-    const encoded = 'javascript:(function(){' + encodeURIComponent(AUTOPILOT_CODE) + '})();';
+// Path to the version manifest file on your web server.
+// When an admin publishes a new version, they upload the
+// downloaded JSON to this path alongside index.html.
+const REMOTE_VERSION_URL = './autopilot-version.json';
+
+// How long (ms) to trust a cached version before re-checking the server.
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+// localStorage keys
+const CACHE_KEY    = 'geo_ap_version_cache';
+const HISTORY_KEY  = 'geo_ap_version_history';
+
+// Admin password (base64-obfuscated). Change this before deploying.
+// To generate: open browser console → btoa('YourNewPassword')
+// Default password: GeoAdmin2024
+const ADMIN_HASH = 'R2VvQWRtaW4yMDI0';
+
+// ============================================================
+//  BUNDLED FALLBACK (v3.7 — always available offline)
+// ============================================================
+const BUNDLED_VERSION = '3.7';
+const BUNDLED_DATE    = '2025-01-15';
+const BUNDLED_NOTES   = 'Initial release — Bunker ROB validation & multi-report autopilot.';
+
+const BUNDLED_CODE = "const CONFIG = { REQUIRE_BUNKER_DATA: true, STEAMING_HOURS_MIN: 16, STEAMING_HOURS_MAX: 26, ADJ_TOLERANCE: 0.01, SLEEP_POLL_MS: 500, SLEEP_POST_CLICK_MS: 1200, DOM_STABLE_HEADSTART_MS: 400, SLEEP_POST_NAVIGATE_MS: 3500, SLEEP_INIT_MS: 500, DOM_STABLE_TIMEOUT_MS: 3000, DOM_STABLE_DEBOUNCE_MS: 200, }; const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms)); window.autopilotRunning = false; function getAllContexts() { const contexts = [document]; const iframes = document.querySelectorAll('iframe'); for (const iframe of iframes) { try { const doc = iframe.contentDocument || iframe.contentWindow.document; if (doc) contexts.push(doc); } catch(_) {} } return contexts; } function queryAllContexts(selector) { let elements = []; for (const ctx of getAllContexts()) { try { if (ctx) elements = elements.concat(Array.from(ctx.querySelectorAll(selector))); } catch(_) {} } return elements; } function waitForDOMStable(timeoutMs = CONFIG.DOM_STABLE_TIMEOUT_MS, debounceMs = CONFIG.DOM_STABLE_DEBOUNCE_MS) { return new Promise((resolve) => { let debounceTimer = null; const hardTimeout = setTimeout(() => { resolve(); }, timeoutMs); const observer = new MutationObserver(() => { clearTimeout(debounceTimer); debounceTimer = setTimeout(() => { observer.disconnect(); clearTimeout(hardTimeout); resolve(); }, debounceMs); }); getAllContexts().forEach(ctx => { try { if (ctx && ctx.body) { observer.observe(ctx.body, { childList: true, subtree: true, attributes: true }); } } catch(_) {} }); debounceTimer = setTimeout(() => { observer.disconnect(); clearTimeout(hardTimeout); resolve(); }, debounceMs); }); } function findSteamingHoursInput() { for (const ctx of getAllContexts()) { if (!ctx) continue; let input = ctx.querySelector('#steaminghours') || ctx.querySelector('[name*=\"steaming\" i]') || ctx.querySelector('[id*=\"steaming\" i]'); if (input) return input; const elements = Array.from(ctx.querySelectorAll('label, span, div, th')); for (const el of elements) { const txt = (el.innerText || \"\").toLowerCase(); if (txt === 'steaming hours' || txt === 'steaming hrs' || txt.includes('steaming hours')) { const parent = el.parentElement; if (parent) { const adjInput = parent.querySelector('input'); if (adjInput) return adjInput; } } } } return null; } function locateTrueBunkerContainer() { for (const ctx of getAllContexts()) { if (!ctx) continue; const fieldsets = ctx.querySelectorAll('fieldset'); for (const fs of fieldsets) { const legend = fs.querySelector('legend'); if (legend) { const legendText = legend.innerText.trim().toUpperCase(); if (legendText === 'BUNKER ROB') { return fs; } } } } const badges = queryAllContexts('.p-panel-header, .p-component-header, legend, .bunker-header'); for (const badge of badges) { const text = (badge.innerText || \"\").toUpperCase(); if (text === 'BUNKER ROB' || text === 'BUNKER') { let current = badge.parentElement; while (current && current !== current.ownerDocument.body) { if (current.tagName === 'FIELDSET' || current.classList.contains('p-component') || current.classList.contains('card')) { return current; } current = current.parentElement; } } } return null; } function locateBunkerRows() { const bunkerContainer = locateTrueBunkerContainer(); if (!bunkerContainer) return []; let rows = Array.from(bunkerContainer.querySelectorAll('tbody tr, .p-datatable-tbody tr')); if (rows.length === 0) rows = Array.from(bunkerContainer.querySelectorAll('tr')); return rows.filter(row => { if (row.closest('thead') || row.classList.contains('p-datatable-thead') || row.querySelector('th')) { return false; } const inputs = Array.from(row.querySelectorAll('input')).filter(inp => { if (inp.type === 'hidden' || inp.disabled) return false; const style = window.getComputedStyle(inp); return style.display !== 'none' && style.visibility !== 'hidden'; }); return inputs.length >= 2; }); } async function validateCurrentReport() { clearStatus(); setStatus(\"Initiating Smart Sandbox Scan...\", \"info\"); await sleep(CONFIG.SLEEP_INIT_MS); let isValid = true; const errors = []; const steamingHoursInput = findSteamingHoursInput(); if (steamingHoursInput && steamingHoursInput.value.trim() !== \"\") { const hours = parseFloat(steamingHoursInput.value); if (isNaN(hours) || hours < CONFIG.STEAMING_HOURS_MIN || hours > CONFIG.STEAMING_HOURS_MAX) { errors.push(`Steaming hours (${hours}) outside bounds.`); steamingHoursInput.style.border = \"3px solid #f44336\"; isValid = false; setStatus(`\u274c Steaming hrs failed: ${hours}`, \"error\"); } else { steamingHoursInput.style.border = \"1px solid green\"; setStatus(`\u2705 Steaming hrs OK: ${hours}`, \"success\"); } } else { setStatus(\"\u2139\ufe0f Steaming Hours field unpopulated or not applicable to this layout index.\", \"info\"); } setStatus(\"Targeting isolated Bunker ROB grid...\", \"info\"); let bunkerRows = locateBunkerRows(); if (bunkerRows.length === 0) { setStatus(\"\u26a0\ufe0f No active Bunker ROB records isolated inside this frame context.\", \"warning\"); return isValid; } let validationFailTriggered = false; bunkerRows.forEach((row, index) => { const cells = Array.from(row.querySelectorAll('td')); let fuelTypeLabel = (cells[0] && cells[0].innerText.trim().split('\\n')[0]) || `Line ${index + 1}`; let lastRobInput = null; let robStartInput = null; cells.forEach(cell => { const titleEl = cell.querySelector('.p-column-title'); const titleText = titleEl ? titleEl.innerText.toLowerCase().trim() : ''; const input = cell.querySelector('input'); if (!input) return; if (titleText.includes('last rob') || titleText.includes('previous')) { lastRobInput = input; } else if (titleText.includes('rob start') || titleText.includes('start')) { robStartInput = input; } }); if (!lastRobInput || !robStartInput) { const rowInputs = cells.map(c => c.querySelector('input')).filter(inp => inp && inp.type !== 'hidden' && !inp.disabled); if (rowInputs.length >= 2) { lastRobInput = rowInputs[0]; robStartInput = rowInputs[1]; } } if (!lastRobInput || !robStartInput) return; const lastRobVal = parseFloat(lastRobInput.value.replace(/,/g, '').trim()); const robStartVal = parseFloat(robStartInput.value.replace(/,/g, '').trim()); const safeLast = isNaN(lastRobVal) ? 0 : lastRobVal; const safeStart = isNaN(robStartVal) ? 0 : robStartVal; if (lastRobInput.value.trim() === \"\" && robStartInput.value.trim() === \"\") return; if (Math.abs(safeLast - safeStart) > CONFIG.ADJ_TOLERANCE) { errors.push(`[${fuelTypeLabel}] Mismatch: Last (${safeLast}) != Start (${safeStart})`); lastRobInput.style.cssText = \"border: 3px solid red !important; background-color: #ffebee !important;\"; robStartInput.style.cssText = \"border: 3px solid red !important; background-color: #ffebee !important;\"; isValid = false; validationFailTriggered = true; setStatus(`\u274c Mismatch [${fuelTypeLabel}]: Last (${safeLast}) \u2260 Start (${safeStart})`, \"error\"); } else { lastRobInput.style.cssText = \"border: 1px solid green !important; background-color: #e8f5e9 !important;\"; robStartInput.style.cssText = \"border: 1px solid green !important; background-color: #e8f5e9 !important;\"; } }); if (bunkerRows.length > 0 && !validationFailTriggered) { setStatus(`\u2705 Confirmed perfect data alignment inside Bunker ROB grid.`, \"success\"); } await sleep(CONFIG.SLEEP_POLL_MS); if (!isValid) { setStatus(`\ud83d\uded1 LOCKOUT: Real data error caught in Bunker ROB panel. Autopilot halted.`, \"error\"); } else { setStatus(\"All system safety checks cleared.\", \"success\"); } return isValid; } async function approveReport() { setStatus(\"Scanning interface for submission buttons...\", \"info\"); let approveBtn = queryAllContexts('button[label=\"Approve\"], [appconfirmation][label=\"Approve\"], .p-button[label=\"Approve\"]')[0]; if (!approveBtn) { approveBtn = queryAllContexts('button, .p-button, [role=\"button\"]').find(el => { const label = (el.getAttribute('label') || \"\").toLowerCase(); return label === 'approve' || label.includes('approve'); }); } if (!approveBtn) { let textCheck = \"\"; getAllContexts().forEach(ctx => { if (ctx && ctx.body) textCheck += (ctx.body.innerText || \"\"); }); if (textCheck.includes(\"Approved\") && (textCheck.includes(\"Re Ingest\") || textCheck.includes(\"Resubmit\"))) { setStatus(\"\u26a0\ufe0f File is already approved. Proceeding to skip forward...\", \"warning\"); return \"skipped\"; } setStatus(\"\u274c Submission button context link unreadable.\", \"error\"); return false; } approveBtn.click(); await sleep(CONFIG.SLEEP_POST_CLICK_MS); setStatus(\"Confirming report verification dialogue...\", \"info\"); let yesBtn = queryAllContexts('.p-confirm-dialog-accept, button[label=\"Yes\"]')[0]; if (!yesBtn) { yesBtn = queryAllContexts('button, span, div, .p-button').find(el => { const text = (el.innerText || el.textContent || \"\").trim().toLowerCase(); const label = (el.getAttribute('label') || \"\").toLowerCase(); return text === 'yes' || label === 'yes' || text === 'confirm' || text === 'ok'; }); } if (!yesBtn) { setStatus(\"\u274c Modal submission dialogue confirmation button missing.\", \"error\"); return false; } yesBtn.click(); setStatus(\"\u2705 Submission confirmation completed.\", \"success\"); await sleep(CONFIG.DOM_STABLE_HEADSTART_MS); await waitForDOMStable(); return true; } async function goToNextPendingReport() { setStatus(\"Analyzing sidebar tracker matrix...\", \"info\"); const sidebarCards = queryAllContexts('.card, div[class*=\"card\"]') .filter(card => { const text = card.innerText || \"\"; return text.includes(\"Report\") || text.includes(\"Notice\"); }); const pendingCards = sidebarCards.filter(card => { const bgColor = card.style.backgroundColor || window.getComputedStyle(card).backgroundColor; return bgColor === 'rgb(255, 255, 255)' || bgColor === 'rgba(0, 0, 0, 0)' || bgColor === 'transparent'; }); const nextPendingCard = pendingCards[pendingCards.length - 1]; if (nextPendingCard) { setStatus(\"\u27a1\ufe0f Transitioning interface context to next data index line...\", \"success\"); nextPendingCard.click(); await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS); return true; } else { setStatus(\"\ud83c\udf89 Queue cleared successfully with clean data locks!\", \"success\"); return false; } } async function runAutopilot() { try { while (window.autopilotRunning) { const isValid = await validateCurrentReport(); if (!isValid) { window.autopilotRunning = false; updateUIButton(); break; } const approved = await approveReport(); if (approved === false) { window.autopilotRunning = false; updateUIButton(); break; } const hasMoreReports = await goToNextPendingReport(); if (!hasMoreReports) { window.autopilotRunning = false; updateUIButton(); break; } } } catch (err) { window.autopilotRunning = false; updateUIButton(); setStatus(`\ud83d\udca5 Operational Exception: ${err.message}`, \"error\"); } } function injectControlPanel() { document.getElementById(\"autopilot-btn\")?.remove(); document.getElementById(\"autopilot-status\")?.remove(); const statusBox = document.createElement('div'); statusBox.id = \"autopilot-status\"; statusBox.style.cssText = ` position: fixed; bottom: 85px; left: 20px; z-index: 99999; padding: 12px; font-size: 13px; font-family: monospace; background-color: rgba(10, 11, 15, 0.98); color: #fff; border: 1px solid #444; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.7); display: none; min-width: 320px; max-height: 220px; overflow-y: auto; `; document.body.appendChild(statusBox); const btn = document.createElement('button'); btn.id = \"autopilot-btn\"; btn.innerText = \"\u25b6 Start Autopilot (v3.7)\"; btn.style.cssText = ` position: fixed; bottom: 20px; left: 20px; z-index: 99999; padding: 15px 25px; font-size: 16px; font-weight: bold; background-color: #2e7d32; color: white; border: none; border-radius: 5px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5); `; btn.addEventListener('click', () => { window.autopilotRunning = !window.autopilotRunning; updateUIButton(); if (window.autopilotRunning) { document.getElementById(\"autopilot-status\").style.display = \"block\"; runAutopilot(); } else { setStatus(\"\u23f9 Interrupted execution chain manually.\", \"warning\"); } }); document.body.appendChild(btn); } function setStatus(message, type = 'info') { const box = document.getElementById(\"autopilot-status\"); if (!box) return; const colorMap = { success: \"#81c784\", error: \"#e57373\", warning: \"#fff176\" }; const color = colorMap[type] || \"#ffffff\"; const line = document.createElement('div'); line.style.cssText = `color: ${color}; margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px;`; line.innerText = message; box.appendChild(line); box.scrollTop = box.scrollHeight; } function clearStatus() { const box = document.getElementById(\"autopilot-status\"); if (box) box.innerHTML = \"<div style='color:#888; margin-bottom:8px; font-weight:bold;'>\ud83e\udd16 SYSTEM ACTIVE LOG (v3.7):</div>\"; } function updateUIButton() { const btn = document.getElementById(\"autopilot-btn\"); if (!btn) return; if (window.autopilotRunning) { btn.innerText = \"\u23f9 STOP Autopilot\"; btn.style.backgroundColor = \"#c62828\"; } else { btn.innerText = \"\u25b6 Start Autopilot (v3.7)\"; btn.style.backgroundColor = \"#2e7d32\"; } } injectControlPanel();";
+
+// ============================================================
+//  VERSION MANAGER
+// ============================================================
+const VersionManager = {
+
+    /** Load the active version using a 3-tier cascade:
+     *  1. Remote manifest (./autopilot-version.json) — shared across ALL users
+     *  2. localStorage cache (last successful remote fetch, with TTL)
+     *  3. Bundled fallback (always available, no network needed)
+     */
+    async loadActive() {
+        // Tier 1: Remote server manifest
+        try {
+            const res = await fetch(REMOTE_VERSION_URL + '?_t=' + Date.now(), {
+                cache: 'no-store',
+                signal: AbortSignal.timeout(4000)
+            });
+            if (res.ok) {
+                const data = await res.json();
+                if (data && data.version && data.code) {
+                    const versioned = { ...data, source: 'live' };
+                    this._writeCache(versioned);
+                    this._addHistory(versioned);
+                    return versioned;
+                }
+            }
+        } catch (_) { /* network unavailable or no manifest yet — fall through */ }
+
+        // Tier 2: localStorage cache
+        const cached = this._readCache();
+        if (cached) return cached;
+
+        // Tier 3: Bundled fallback
+        return {
+            version: BUNDLED_VERSION,
+            code:    BUNDLED_CODE,
+            notes:   BUNDLED_NOTES,
+            date:    BUNDLED_DATE,
+            source:  'bundled'
+        };
+    },
+
+    /** Cache a fetched version with a timestamp for TTL checks. */
+    _writeCache(data) {
+        try {
+            localStorage.setItem(CACHE_KEY, JSON.stringify({ ...data, _cachedAt: Date.now(), source: 'cache' }));
+        } catch (_) {}
+    },
+
+    /** Read cache; returns null if missing or expired. */
+    _readCache() {
+        try {
+            const raw = localStorage.getItem(CACHE_KEY);
+            if (!raw) return null;
+            const d = JSON.parse(raw);
+            if (Date.now() - d._cachedAt > CACHE_TTL_MS) return null;
+            return d;
+        } catch (_) { return null; }
+    },
+
+    /** Persist a version to cache immediately (used after admin publish). */
+    publishLocal(data) {
+        this._writeCache({ ...data, _cachedAt: Date.now(), source: 'cache' });
+        this._addHistory(data);
+    },
+
+    /** Record a version in the persistent history log. */
+    _addHistory(data) {
+        try {
+            const hist = this.getHistory();
+            if (!hist.find(h => h.version === data.version)) {
+                hist.unshift({
+                    version:  data.version,
+                    notes:    data.notes || '',
+                    date:     data.date  || '',
+                    seenAt:   new Date().toISOString()
+                });
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(hist.slice(0, 30)));
+            }
+        } catch (_) {}
+    },
+
+    getHistory() {
+        try { return JSON.parse(localStorage.getItem(HISTORY_KEY)) || []; }
+        catch (_) { return []; }
+    },
+
+    /** Build the JSON manifest that the admin downloads and deploys to the server. */
+    buildManifest(data) {
+        return JSON.stringify({
+            version:     data.version,
+            date:        data.date,
+            notes:       data.notes,
+            code:        data.code,
+            publishedAt: new Date().toISOString()
+        }, null, 2);
+    }
+};
+
+// ============================================================
+//  APPLY VERSION TO THE PAGE
+// ============================================================
+function applyVersion(data) {
+    const { version, code, source } = data;
+
+    // Update every version label in the DOM
+    document.querySelectorAll('.ver-dynamic').forEach(el => {
+        el.textContent = 'v' + version;
+    });
+    document.title = `Maritime Autopilot v${version} — Setup`;
+
+    // Update source pill
+    const dot   = document.getElementById('source-dot');
+    const label = document.getElementById('source-label');
+    if (dot && label) {
+        dot.className = 'ver-source-dot ' + source;
+        const labels = { live: '🟢 Live', cache: '🟡 Cached', bundled: '⚪ Bundled' };
+        label.textContent = labels[source] || source;
+    }
+
+    // Wire up bookmarklet
+    const encoded = 'javascript:(function(){' + encodeURIComponent(code) + '})();';
+    const payload = 'javascript:(function(){' + code + '})();';
 
     const btn = document.getElementById('autopilot-bookmarklet');
-    btn.href = encoded;
+    if (btn) btn.href = encoded;
 
     const preview = document.getElementById('bookmarklet-preview');
-    preview.textContent = payload.substring(0, 60) + '…';
-    preview._full = encoded;
-});
+    if (preview) {
+        preview.textContent = payload.substring(0, 60) + '…';
+        preview._full = encoded;
+    }
+}
 
+// ============================================================
+//  INIT
+// ============================================================
+async function initVersionSystem() {
+    const data = await VersionManager.loadActive();
+    activeVersionData = data;
+    applyVersion(data);
+}
+
+// ============================================================
+//  ADMIN PANEL STATE
+// ============================================================
+let adminAuthed      = false;
+let activeVersionData = null;
+let adminTab         = 'upload';
+let uploadedCode     = null;
+let pendingManifest  = null;
+
+// ============================================================
+//  ADMIN PANEL OPEN / CLOSE
+// ============================================================
+function openAdminPanel() {
+    document.getElementById('admin-modal').classList.add('open');
+    renderAdminPanel();
+}
+
+function closeAdminPanel() {
+    document.getElementById('admin-modal').classList.remove('open');
+    // Reset file upload state so re-opens are clean
+    uploadedCode    = null;
+    pendingManifest = null;
+}
+
+function handleOverlayClick(e) {
+    if (e.target === document.getElementById('admin-modal')) closeAdminPanel();
+}
+
+// ============================================================
+//  RENDER HELPERS
+// ============================================================
+function renderAdminPanel() {
+    const panel = document.getElementById('admin-content');
+    panel.innerHTML = adminAuthed ? renderTabbedPanel() : renderAuthForm();
+}
+
+/* ---- AUTH FORM ---- */
+function renderAuthForm() {
+    return `
+        <div class="admin-auth">
+            <div class="admin-auth-icon">🔐</div>
+            <h3>Admin Authentication</h3>
+            <p>Enter your credentials to manage autopilot versions.</p>
+            <div class="admin-form-group">
+                <label>Password</label>
+                <input class="admin-input" type="password" id="admin-pwd-input"
+                    placeholder="Enter admin password"
+                    onkeydown="if(event.key==='Enter') verifyAdmin()">
+            </div>
+            <button class="admin-btn admin-btn-primary" onclick="verifyAdmin()">Unlock Panel →</button>
+            <div id="admin-auth-error" class="admin-error" style="display:none">
+                Incorrect password. Please try again.
+            </div>
+        </div>`;
+}
+
+function verifyAdmin() {
+    const input = document.getElementById('admin-pwd-input');
+    if (!input) return;
+    if (btoa(input.value) === ADMIN_HASH) {
+        adminAuthed = true;
+        renderAdminPanel();
+    } else {
+        const err = document.getElementById('admin-auth-error');
+        if (err) err.style.display = 'block';
+        input.value = '';
+        input.focus();
+    }
+}
+
+/* ---- TABBED PANEL ---- */
+function renderTabbedPanel() {
+    const tabContent = adminTab === 'upload'  ? renderUploadTab()  :
+                       adminTab === 'history' ? renderHistoryTab() :
+                                               renderExportTab();
+    return `
+        <div class="admin-tabs">
+            <button class="admin-tab ${adminTab==='upload'  ? 'active' : ''}" onclick="switchTab('upload')">Upload Version</button>
+            <button class="admin-tab ${adminTab==='history' ? 'active' : ''}" onclick="switchTab('history')">History</button>
+            <button class="admin-tab ${adminTab==='export'  ? 'active' : ''}" onclick="switchTab('export')">Export / Import</button>
+        </div>
+        <div>${tabContent}</div>`;
+}
+
+function switchTab(tab) {
+    adminTab     = tab;
+    uploadedCode = null;  // clear file state on tab switch
+    renderAdminPanel();
+}
+
+/* ---- UPLOAD TAB ---- */
+function renderUploadTab() {
+    const curVer = activeVersionData ? activeVersionData.version : BUNDLED_VERSION;
+    return `
+        <div class="admin-current-ver">
+            <span class="admin-label">Currently Active</span>
+            <span class="admin-ver-pill">v${curVer}</span>
+        </div>
+
+        <div class="admin-form-group">
+            <label>New Version Number</label>
+            <input class="admin-input" type="text" id="new-version-input" placeholder="e.g. 3.8">
+        </div>
+
+        <div class="admin-form-group">
+            <label>Release Notes</label>
+            <textarea class="admin-input admin-textarea" id="release-notes-input"
+                placeholder="Describe what changed in this version…"></textarea>
+        </div>
+
+        <div class="admin-form-group">
+            <label>Autopilot Script File (.js)</label>
+            <div class="upload-drop-zone" id="upload-drop-zone"
+                onclick="document.getElementById('file-input').click()"
+                ondragover="handleDragOver(event)"
+                ondragleave="handleDragLeave(event)"
+                ondrop="handleFileDrop(event)">
+                <div class="upload-icon">📦</div>
+                <div class="upload-filename" id="upload-filename">Click or drag .js file here</div>
+                <div class="upload-hint">The updated autopilot bookmarklet script</div>
+            </div>
+            <input type="file" id="file-input" accept=".js,.txt" style="display:none"
+                onchange="handleFileSelect(event)">
+        </div>
+
+        <button class="admin-btn admin-btn-primary" onclick="publishVersion()">
+            🚀 Publish Version
+        </button>
+
+        <div id="publish-error" class="admin-error" style="display:none"></div>
+
+        <div id="deploy-instructions" style="display:none">
+            <div class="deploy-box">
+                <div class="deploy-title">✅ Version published — deploy to push to all users</div>
+                <p>
+                    Your browser is now running the new version. To update <strong>all users</strong>,
+                    upload the manifest file to your web server:
+                </p>
+                <ol class="deploy-steps">
+                    <li>Click <strong>Download Manifest</strong> below</li>
+                    <li>Upload <code>autopilot-version.json</code> to the same directory as <code>index.html</code></li>
+                    <li>Every user will receive the update automatically on their next page load — no action needed on their end</li>
+                </ol>
+                <button class="admin-btn admin-btn-outline" onclick="downloadManifest()">
+                    📥 Download autopilot-version.json
+                </button>
+            </div>
+        </div>`;
+}
+
+/* ---- HISTORY TAB ---- */
+function renderHistoryTab() {
+    const history = VersionManager.getHistory();
+    if (history.length === 0) {
+        return `<div class="admin-empty">No version history yet.<br>History is recorded as versions are fetched.</div>`;
+    }
+    const rows = history.map((h, i) => `
+        <div class="history-row ${i === 0 ? 'history-row-current' : ''}">
+            <div class="history-ver">v${h.version}</div>
+            <div class="history-meta">
+                <div class="history-notes">${h.notes || 'No release notes'}</div>
+                <div class="history-date">${h.date ? 'Released ' + h.date + ' · ' : ''}Seen ${new Date(h.seenAt).toLocaleDateString()}</div>
+            </div>
+            ${i === 0 ? '<span class="history-badge">Active</span>' : ''}
+        </div>`).join('');
+    return `<div class="version-history">${rows}</div>`;
+}
+
+/* ---- EXPORT / IMPORT TAB ---- */
+function renderExportTab() {
+    return `
+        <p class="admin-desc">
+            Export the current version manifest to share with other admins or as a deployment artifact.
+            Import a manifest to immediately apply a version in this browser.
+        </p>
+        <div class="export-row">
+            <button class="admin-btn admin-btn-outline" onclick="exportManifest()">📤 Export Manifest</button>
+            <button class="admin-btn admin-btn-outline" onclick="document.getElementById('import-file').click()">📥 Import Manifest</button>
+            <input type="file" id="import-file" accept=".json" style="display:none" onchange="importManifest(event)">
+        </div>
+        <div id="export-status" style="display:none;margin-top:4px"></div>
+        <div class="admin-note">
+            <strong>How it works:</strong> The page fetches <code>./autopilot-version.json</code> from your web server
+            on every load. Once an admin publishes a new version and deploys the manifest to the server,
+            all users automatically receive the update — no reinstallation required.
+        </div>`;
+}
+
+// ============================================================
+//  FILE UPLOAD HANDLERS
+// ============================================================
+function handleDragOver(e) {
+    e.preventDefault();
+    document.getElementById('upload-drop-zone')?.classList.add('dragging');
+}
+function handleDragLeave(e) {
+    document.getElementById('upload-drop-zone')?.classList.remove('dragging');
+}
+function handleFileDrop(e) {
+    e.preventDefault();
+    document.getElementById('upload-drop-zone')?.classList.remove('dragging');
+    const file = e.dataTransfer.files[0];
+    if (file) readFile(file);
+}
+function handleFileSelect(e) {
+    const file = e.target.files[0];
+    if (file) readFile(file);
+}
+function readFile(file) {
+    const reader = new FileReader();
+    reader.onload = ev => {
+        uploadedCode = ev.target.result.trim();
+        const zone = document.getElementById('upload-drop-zone');
+        const name = document.getElementById('upload-filename');
+        if (zone) zone.classList.add('loaded');
+        if (name) name.textContent = '✅ ' + file.name + ' — ready to publish';
+    };
+    reader.readAsText(file);
+}
+
+// ============================================================
+//  PUBLISH FLOW
+// ============================================================
+function publishVersion() {
+    const versionNum = document.getElementById('new-version-input')?.value.trim();
+    const notes      = document.getElementById('release-notes-input')?.value.trim();
+    const errEl      = document.getElementById('publish-error');
+
+    if (!versionNum)   { showPublishError('Version number is required.'); return; }
+    if (!uploadedCode) { showPublishError('Please upload a .js script file first.'); return; }
+
+    const versionData = {
+        version: versionNum,
+        notes:   notes || 'No release notes provided.',
+        date:    new Date().toISOString().split('T')[0],
+        code:    uploadedCode
+    };
+
+    // Apply locally immediately
+    VersionManager.publishLocal(versionData);
+    activeVersionData = versionData;
+    applyVersion(versionData);
+
+    // Build downloadable manifest
+    pendingManifest = VersionManager.buildManifest(versionData);
+
+    // Show deploy instructions
+    const deployEl = document.getElementById('deploy-instructions');
+    if (deployEl) deployEl.style.display = 'block';
+    if (errEl)    errEl.style.display    = 'none';
+
+    showToast(`v${versionNum} applied locally. Download the manifest and deploy to push to all users.`);
+}
+
+function showPublishError(msg) {
+    const el = document.getElementById('publish-error');
+    if (el) { el.textContent = msg; el.style.display = 'block'; }
+}
+
+function downloadManifest() {
+    if (!pendingManifest) return;
+    triggerDownload('autopilot-version.json', pendingManifest, 'application/json');
+}
+
+function exportManifest() {
+    const cache = VersionManager._readCache();
+    const source = cache || {
+        version: BUNDLED_VERSION, notes: BUNDLED_NOTES, date: BUNDLED_DATE, code: BUNDLED_CODE
+    };
+    const json = VersionManager.buildManifest(source);
+    triggerDownload('autopilot-version.json', json, 'application/json');
+    const el = document.getElementById('export-status');
+    if (el) {
+        el.className = 'admin-success';
+        el.textContent = `✅ Exported v${source.version} manifest.`;
+        el.style.display = 'block';
+    }
+}
+
+function importManifest(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+        try {
+            const data = JSON.parse(ev.target.result);
+            if (!data.version || !data.code) throw new Error('Missing version or code fields');
+            VersionManager.publishLocal(data);
+            activeVersionData = data;
+            applyVersion(data);
+            const el = document.getElementById('export-status');
+            if (el) {
+                el.className = 'admin-success';
+                el.textContent = `✅ Imported and applied v${data.version} successfully.`;
+                el.style.display = 'block';
+            }
+        } catch (err) {
+            const el = document.getElementById('export-status');
+            if (el) {
+                el.className = 'admin-error';
+                el.textContent = 'Invalid manifest: ' + err.message;
+                el.style.display = 'block';
+            }
+        }
+    };
+    reader.readAsText(file);
+}
+
+function triggerDownload(filename, content, type) {
+    const blob = new Blob([content], { type });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+}
+
+// ============================================================
+//  TOAST
+// ============================================================
+function showToast(msg) {
+    const toast = document.getElementById('toast');
+    const text  = document.getElementById('toast-text');
+    if (text)  text.textContent = msg;
+    toast.classList.add('show');
+    setTimeout(() => toast.classList.remove('show'), 4000);
+}
+
+// ============================================================
+//  COPY BOOKMARKLET
+// ============================================================
 function copyBookmarklet() {
     const preview = document.getElementById('bookmarklet-preview');
-    const full = preview._full;
+    const full    = preview?._full;
     if (!full) return;
 
     navigator.clipboard.writeText(full).then(() => {
         const btn = document.getElementById('copy-btn');
         btn.textContent = '✓ Copied!';
         btn.classList.add('copied');
-        setTimeout(() => {
-            btn.textContent = 'Copy code';
-            btn.classList.remove('copied');
-        }, 2500);
-
-        const toast = document.getElementById('toast');
-        toast.classList.add('show');
-        setTimeout(() => toast.classList.remove('show'), 3000);
+        setTimeout(() => { btn.textContent = 'Copy code'; btn.classList.remove('copied'); }, 2500);
+        showToast('Copied to clipboard!');
     }).catch(() => {
-        // Fallback: select the text
-        const range = document.createRange();
         const tmp = document.createElement('textarea');
         tmp.value = full;
         document.body.appendChild(tmp);
@@ -440,6 +1437,21 @@ function copyBookmarklet() {
         document.body.removeChild(tmp);
     });
 }
+
+// ============================================================
+//  KEYBOARD SHORTCUT  Ctrl+Shift+A
+// ============================================================
+document.addEventListener('keydown', e => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'A') {
+        e.preventDefault();
+        openAdminPanel();
+    }
+});
+
+// ============================================================
+//  BOOT
+// ============================================================
+initVersionSystem();
 </script>
 </body>
 </html>
