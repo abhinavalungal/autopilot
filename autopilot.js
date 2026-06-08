@@ -1,5 +1,5 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v5.5 (Unified Validation Engine)
+//   MARITIME REPORT AUTOPILOT — v5.6 (Location-Aware Validation)
 //   Fixes & Upgrades applied:
 //     [FIX-1 to 7] Maintained core timeline engine stability fixes.
 //     [FIX-8] Connected bridge between DOM scrapers and compliance matrix.
@@ -12,12 +12,18 @@
 //             rejected if any ADJ cell value is non-zero.
 //     [UPGRADE - v5.5] VERBOSE AUDIT LOGS: Added explicit, descriptive on-screen
 //             success confirmations for each step to make approvals fully transparent.
+//     [FIX - v5.6-A] STEAMING HOURS: In Port context allows 0–24 hrs (was 16–26).
+//     [FIX - v5.6-B] PORT WHITELIST: Added DISCHARGING and IDLE event types.
+//     [FIX - v5.6-C] LOCATION DETECTION: Report type now resolved from the actual
+//             Location dropdown value, preventing false "At Sea" context errors.
 // =========================================================================
 
 const CONFIG = {
     REQUIRE_BUNKER_DATA: true,
     STEAMING_HOURS_MIN: 16,
     STEAMING_HOURS_MAX: 26,
+    STEAMING_HOURS_IN_PORT_MIN: 0,
+    STEAMING_HOURS_IN_PORT_MAX: 24,
     ADJ_TOLERANCE: 0.01,
     SLEEP_POLL_MS: 500,
     SLEEP_POST_CLICK_MS: 1200,
@@ -37,7 +43,9 @@ const CONFIG = {
         'DRIFTING OR REDUCTION FOR SAFETY REASON',
         'CANAL/STRAIT TRANSIT',
         'DRY DOCK / SHIPYARD PERIOD',
-        'SEA TRIALS'
+        'SEA TRIALS',
+        'DISCHARGING',
+        'IDLE'
     ]
 };
 
@@ -218,13 +226,43 @@ function checkIsDuplicateReport() {
 
 function extractReportContext() {
     let reportType = "In Port Report";
-    
-    const subHeaders = queryAllContexts('.p-panel-header, h1, h2, h3, .report-title');
-    for (const sh of subHeaders) {
-        const txt = (sh.innerText || '').toUpperCase();
-        if (txt.includes('NOON') || txt.includes('AT SEA')) {
-            reportType = "At Sea NOON Report";
+
+    // [FIX v5.6-C] Primary: resolve report type from the actual Location field.
+    // This prevents false "At Sea" classification when the vessel is In Port.
+    let locationValue = '';
+    for (const ctx of getAllContexts()) {
+        if (!ctx) continue;
+        // Try select dropdown first (most common)
+        const locSelect = ctx.querySelector(
+            'select[id*="location" i], select[name*="location" i]'
+        );
+        if (locSelect && locSelect.options[locSelect.selectedIndex]) {
+            locationValue = locSelect.options[locSelect.selectedIndex].text.trim().toLowerCase();
             break;
+        }
+        // Fallback: text input
+        const locInput = ctx.querySelector(
+            'input[id*="location" i], input[name*="location" i]'
+        );
+        if (locInput && locInput.value.trim()) {
+            locationValue = locInput.value.trim().toLowerCase();
+            break;
+        }
+    }
+
+    if (locationValue.includes('in port') || locationValue === 'port') {
+        reportType = "In Port Report";
+    } else if (locationValue.includes('at sea') || locationValue.includes('sea')) {
+        reportType = "At Sea NOON Report";
+    } else {
+        // Fallback: scan panel/page headers when location field is unavailable
+        const subHeaders = queryAllContexts('.p-panel-header, h1, h2, h3, .report-title');
+        for (const sh of subHeaders) {
+            const txt = (sh.innerText || '').toUpperCase();
+            if (txt.includes('NOON') || txt.includes('AT SEA')) {
+                reportType = "At Sea NOON Report";
+                break;
+            }
         }
     }
 
@@ -444,7 +482,7 @@ function locateBunkerRows() {
 
 async function validateCurrentReport() {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v5.5)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v5.6)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     let isValid = true;
@@ -476,21 +514,29 @@ async function validateCurrentReport() {
     }
 
     // 3. STEAMING HOURS VALIDATION
+    // [FIX v5.6-A] Resolve context early so steaming bounds are location-aware.
+    const earlyContext = extractReportContext();
+    const steamMin = earlyContext.reportType === 'In Port Report'
+        ? CONFIG.STEAMING_HOURS_IN_PORT_MIN
+        : CONFIG.STEAMING_HOURS_MIN;
+    const steamMax = earlyContext.reportType === 'In Port Report'
+        ? CONFIG.STEAMING_HOURS_IN_PORT_MAX
+        : CONFIG.STEAMING_HOURS_MAX;
+    const steamLabel = earlyContext.reportType === 'In Port Report'
+        ? `${CONFIG.STEAMING_HOURS_IN_PORT_MIN}–${CONFIG.STEAMING_HOURS_IN_PORT_MAX}`
+        : `${CONFIG.STEAMING_HOURS_MIN}–${CONFIG.STEAMING_HOURS_MAX}`;
+
     const steamingHoursInput = findSteamingHoursInput();
     if (steamingHoursInput && steamingHoursInput.value.trim() !== '') {
         const hours = parseFloat(steamingHoursInput.value);
-        if (
-            isNaN(hours) ||
-            hours < CONFIG.STEAMING_HOURS_MIN ||
-            hours > CONFIG.STEAMING_HOURS_MAX
-        ) {
-            errors.push(`Steaming hours (${hours}) outside bounds.`);
+        if (isNaN(hours) || hours < steamMin || hours > steamMax) {
+            errors.push(`Steaming hours (${hours}) outside bounds [${steamLabel}].`);
             steamingHoursInput.style.border = '3px solid #f44336';
             isValid = false;
-            setStatus(`❌ Steaming hrs failed bounds check: ${hours}`, 'error');
+            setStatus(`❌ Steaming hrs failed bounds check: ${hours} (allowed: ${steamLabel} for ${earlyContext.reportType})`, 'error');
         } else {
             steamingHoursInput.style.border = '1px solid green';
-            setStatus(`✅ Steaming Hours Matrix: Value (${hours} hrs) falls perfectly within safe parameters.`, 'success');
+            setStatus(`✅ Steaming Hours Matrix: Value (${hours} hrs) within safe parameters [${steamLabel}] for ${earlyContext.reportType}.`, 'success');
         }
     } else {
         setStatus('ℹ️ Steaming Hours: Field unpopulated or not applicable to this report layout index.', 'info');
@@ -827,7 +873,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v5.5)';
+    btn.innerText = '▶ Start Autopilot (v5.6)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -878,7 +924,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v5.5)';
+        btn.innerText = '▶ Start Autopilot (v5.6)';
         btn.style.backgroundColor = '#2e7d32';
     }
 }
@@ -902,7 +948,9 @@ class GeoformsTimelineValidator {
             'Drifting or Reduction for safety reason',
             'Canal/Strait Transit',
             'Dry Dock / Shipyard Period',
-            'Sea Trials'
+            'Sea Trials',
+            'Discharging',
+            'Idle'
         ];
 
         this.SEA_EVENTS_WHITELIST = [
