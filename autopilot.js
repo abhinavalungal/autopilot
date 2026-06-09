@@ -38,6 +38,7 @@ const CONFIG = {
         'SHIFT TO ANCHOR',
         'SHIFTING TO ANCHORAGE',
         'SHIFT TO BERTH',
+        'SHIFTING TO BERTH',
         'LOAD - DISCH - IDLE',
         'SHIFT FROM LAST BERTH TO SEA',
         'DRIFTING OR REDUCTION FOR SAFETY REASON',
@@ -505,7 +506,7 @@ async function validateCurrentReport() {
 
     if (eventCheck.status === 'INVALID') {
         isValid = false;
-        setStatus(`🛑 LOCKOUT: Unapproved event scenario detected [${eventCheck.event}]. Halted.', 'error`);
+        setStatus(`🛑 LOCKOUT: Unapproved event scenario detected [${eventCheck.event}]. Halted.`, 'error');
         return false;
     } else if (eventCheck.status === 'VALID_PORT') {
         setStatus('✅ Operational Scenario: Approved Port Event layout and sequence rules confirmed.', 'success');
@@ -795,16 +796,49 @@ async function goToNextPendingReport() {
         return text.includes('Report') || text.includes('Notice');
     });
 
-    const pendingCards = sidebarCards.filter(card => {
+    if (sidebarCards.length === 0) {
+        setStatus('🎉 Queue cleared successfully with clean data locks!', 'success');
+        return false;
+    }
+
+    // Identify the currently active card by its highlighted state
+    const isActive = card =>
+        card.classList.contains('active') ||
+        card.classList.contains('p-highlight') ||
+        card.classList.contains('selected');
+
+    const isPending = card => {
         const bgColor = card.style.backgroundColor || window.getComputedStyle(card).backgroundColor;
         return (
             bgColor === 'rgb(255, 255, 255)' ||
             bgColor === 'rgba(0, 0, 0, 0)' ||
             bgColor === 'transparent'
         );
-    });
+    };
 
-    const nextPendingCard = pendingCards[0];
+    const currentIndex = sidebarCards.findIndex(isActive);
+
+    // Search forward from position after current card for the next pending report
+    const searchFrom = currentIndex >= 0 ? currentIndex + 1 : 0;
+    let nextPendingCard = null;
+
+    for (let i = searchFrom; i < sidebarCards.length; i++) {
+        if (isPending(sidebarCards[i])) {
+            nextPendingCard = sidebarCards[i];
+            break;
+        }
+    }
+
+    // Fallback: if nothing found ahead, scan from the top (handles non-sequential layouts)
+    if (!nextPendingCard) {
+        for (let i = 0; i < searchFrom; i++) {
+            if (isPending(sidebarCards[i])) {
+                nextPendingCard = sidebarCards[i];
+                setStatus('ℹ️ No pending reports ahead — wrapping to earliest unapproved entry.', 'info');
+                break;
+            }
+        }
+    }
 
     if (nextPendingCard) {
         setStatus('➡️ Transitioning interface context to next data index line...', 'success');
@@ -943,6 +977,7 @@ class GeoformsTimelineValidator {
             'Shift to Anchor',
             'Shifting to Anchorage',
             'Shift to Berth',
+            'Shifting to Berth',
             'Load - Disch - Idle',
             'Shift from Last Berth to Sea',
             'Drifting or Reduction for safety reason',
