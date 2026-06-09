@@ -741,39 +741,27 @@ async function approveReport() {
     yesBtn.click();
     
     // --- OVERRIDE INTERCEPTOR FOR ZERO DISTANCE WARNINGS ---
+    // Triggered only when the "Proceed Anyway" button is physically present in
+    // the DOM — prevents false positives from form field labels containing
+    // the words "observed distance".
     setStatus('Evaluating modal chain for trailing warnings...', 'info');
     await sleep(800);
 
-    let combinedScreenText = '';
-    getAllContexts().forEach(ctx => {
-        if (ctx && ctx.body) combinedScreenText += ctx.body.innerText || '';
+    const proceedAnyway = queryAllContexts('button, .p-button, [role="button"]').find(el => {
+        const innerT = (el.innerText || el.textContent || '').trim().toLowerCase();
+        const labelT = (el.getAttribute('label') || '').toLowerCase();
+        return innerT.includes('proceed anyway') || labelT.includes('proceed anyway');
     });
 
-    if (
-        combinedScreenText.toLowerCase().includes('observed distance reported is 0') ||
-        combinedScreenText.toLowerCase().includes('observed distance')
-    ) {
+    if (proceedAnyway) {
         const contextData = extractReportContext();
-
         if (contextData.reportType === 'In Port Report') {
             setStatus('⚠️ Distance 0 warning caught in Port Context. Bypassing safely...', 'warning');
-            
-            let proceedBtn = queryAllContexts('button, .p-button, [role="button"]').find(el => {
-                const innerT = (el.innerText || el.textContent || '').trim().toLowerCase();
-                const labelT = (el.getAttribute('label') || '').toLowerCase();
-                return innerT.includes('proceed anyway') || labelT.includes('proceed anyway');
-            });
-
-            if (proceedBtn) {
-                proceedBtn.click();
-                setStatus('✅ "Proceed Anyway" bypassed warning successfully.', 'success');
-                await sleep(CONFIG.SLEEP_POST_CLICK_MS);
-            } else {
-                setStatus('❌ Zero distance warning detected, but "Proceed Anyway" button is unreachable.', 'error');
-                return false;
-            }
+            proceedAnyway.click();
+            setStatus('✅ "Proceed Anyway" bypassed warning successfully.', 'success');
+            await sleep(CONFIG.SLEEP_POST_CLICK_MS);
         } else {
-            setStatus('🛑 LOCKOUT: Observed Distance is 0 warning dropped in an AT SEA report context! Halted.', 'error');
+            setStatus('🛑 LOCKOUT: Observed Distance is 0 warning in AT SEA context! Halted.', 'error');
             return false;
         }
     }
@@ -802,35 +790,29 @@ async function goToNextPendingReport() {
         return false;
     }
 
-    // Identify the currently active card by its highlighted state
+    // Pending = white/transparent background (not yet approved).
+    // Active  = the card currently open; detected by non-white computed bg
+    //           OR standard active-state CSS classes.
+    const isPending = card => {
+        const bg = window.getComputedStyle(card).backgroundColor;
+        return bg === 'rgb(255, 255, 255)' || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent';
+    };
+
     const isActive = card =>
         card.classList.contains('active') ||
         card.classList.contains('p-highlight') ||
-        card.classList.contains('selected');
-
-    const isPending = card => {
-        const bgColor = card.style.backgroundColor || window.getComputedStyle(card).backgroundColor;
-        return (
-            bgColor === 'rgb(255, 255, 255)' ||
-            bgColor === 'rgba(0, 0, 0, 0)' ||
-            bgColor === 'transparent'
-        );
-    };
+        card.classList.contains('selected') ||
+        !isPending(card);
 
     const currentIndex = sidebarCards.findIndex(isActive);
-
-    // Search forward from position after current card for the next pending report
-    const searchFrom = currentIndex >= 0 ? currentIndex + 1 : 0;
+    const searchFrom   = currentIndex >= 0 ? currentIndex + 1 : 0;
     let nextPendingCard = null;
 
+    // Search forward from the card after the current one
     for (let i = searchFrom; i < sidebarCards.length; i++) {
-        if (isPending(sidebarCards[i])) {
-            nextPendingCard = sidebarCards[i];
-            break;
-        }
+        if (isPending(sidebarCards[i])) { nextPendingCard = sidebarCards[i]; break; }
     }
-
-    // Fallback: if nothing found ahead, scan from the top (handles non-sequential layouts)
+    // Fallback: wrap from top if nothing ahead
     if (!nextPendingCard) {
         for (let i = 0; i < searchFrom; i++) {
             if (isPending(sidebarCards[i])) {
@@ -856,9 +838,33 @@ async function goToNextPendingReport() {
 //   AUTOPILOT LOOP
 // ---------------------------------------------------------------------------
 
+function isCurrentReportAlreadyApproved() {
+    // Detects approved state by presence of Re-Ingest / Open for Resubmit
+    // action buttons which only appear after a report is approved.
+    let screenText = '';
+    getAllContexts().forEach(ctx => {
+        if (ctx && ctx.body) screenText += ctx.body.innerText || '';
+    });
+    return screenText.includes('Re Ingest') || screenText.includes('Open for Resubmit');
+}
+
 async function runAutopilot() {
     try {
         while (window.autopilotRunning) {
+            // If this report is already approved (e.g. user started autopilot
+            // while sitting on an approved report, or landed on one mid-sequence),
+            // skip straight to the next unapproved one.
+            if (isCurrentReportAlreadyApproved()) {
+                setStatus('⚠️ Report already approved — skipping to next unapproved...', 'warning');
+                const hasNext = await goToNextPendingReport();
+                if (!hasNext) {
+                    window.autopilotRunning = false;
+                    updateUIButton();
+                    break;
+                }
+                continue; // re-evaluate the newly loaded report
+            }
+
             const isValid = await validateCurrentReport();
             if (!isValid) {
                 window.autopilotRunning = false;
@@ -917,6 +923,11 @@ function injectControlPanel() {
     `;
 
     btn.addEventListener('click', () => {
+        // Debounce: ignore rapid double-clicks during async navigation sleeps
+        if (btn._clicking) return;
+        btn._clicking = true;
+        setTimeout(() => { btn._clicking = false; }, 600);
+
         window.autopilotRunning = !window.autopilotRunning;
         updateUIButton();
         if (window.autopilotRunning) {
