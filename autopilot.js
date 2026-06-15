@@ -1,5 +1,5 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v5.7 (Departure-Aware + Duplicate Rewrite)
+//   MARITIME REPORT AUTOPILOT — v5.8 (Honest Duplicate Scan)
 //   Fixes & Upgrades applied:
 //     [FIX-1 to 7] Maintained core timeline engine stability fixes.
 //     [FIX-8] Connected bridge between DOM scrapers and compliance matrix.
@@ -36,6 +36,16 @@
 //             sidebar card and scans the ENTIRE list for a full match. A lockout
 //             fires only when ALL FOUR fields are identical. Comment text updated
 //             from "Duplicate Report" → "Duplicate Report Detected".
+//     [FIX - v5.8] HONEST DUPLICATE SCAN: Previously, checkIsDuplicateReport()
+//             returned `false` ("no duplicate") in cases where it actually had
+//             NO DATA to compare against — fewer than 2 sidebar cards, an
+//             unreadable active-card signature, or zero comparable other cards.
+//             This silently auto-passed the Duplicate Scan with a green checkmark
+//             even though no real comparison occurred. The function now returns
+//             a tri-state result: DUPLICATE (lockout), UNIQUE (a real comparison
+//             ran and found no match), or UNABLE_TO_VALIDATE (no usable report
+//             data available). UNABLE_TO_VALIDATE now halts the run with an error
+//             status instead of being reported as a pass.
 // =========================================================================
 
 const CONFIG = {
@@ -235,6 +245,15 @@ function signaturesMatch(a, b) {
     );
 }
 
+// [FIX - v5.8] DUPLICATE SCAN RESULT STATES
+// checkIsDuplicateReport() now returns an object: { status, reason }
+//   status: 'DUPLICATE'           -> exact 4-field match found -> lockout
+//           'UNIQUE'               -> a real comparison was performed against
+//                                     at least one other card and no match was found
+//           'UNABLE_TO_VALIDATE'   -> no usable report data was available to
+//                                     compare against (no sidebar, no signature,
+//                                     or no comparable cards). This must NOT be
+//                                     treated as a pass.
 function checkIsDuplicateReport() {
     // Collect all sidebar report cards
     const sidebarCards = Array.from(
@@ -250,7 +269,12 @@ function checkIsDuplicateReport() {
         );
     });
 
-    if (sidebarCards.length < 2) return false;
+    if (sidebarCards.length < 2) {
+        return {
+            status: 'UNABLE_TO_VALIDATE',
+            reason: `Only ${sidebarCards.length} report card(s) detected in the sidebar — no report list is loaded/accessible to compare against.`
+        };
+    }
 
     // Identify the currently-open card using multiple heuristics (most reliable first)
     const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
@@ -309,22 +333,40 @@ function checkIsDuplicateReport() {
 
     const currentSig = extractCardSignature(currentCard);
 
-    // Guard: if we couldn't extract a meaningful signature, skip duplicate check
-    // to avoid false lockouts (empty vessel name or missing date/time)
+    // [FIX - v5.8] If we couldn't extract a meaningful signature from the
+    // active card, we have no basis for comparison — this is NOT a "no
+    // duplicate" pass, it's an inability to validate.
     if (!currentSig.vesselName || !currentSig.date || !currentSig.time) {
-        return false;
+        return {
+            status: 'UNABLE_TO_VALIDATE',
+            reason: 'Could not extract a valid identity signature (vessel name, date, and time) from the active report card.'
+        };
     }
 
-    // Scan ALL other cards for a full 4-field match
+    // Scan ALL other cards for a full 4-field match, while tracking whether
+    // any other card actually yielded a comparable signature.
+    let comparedAgainstCount = 0;
     for (const card of sidebarCards) {
         if (card === currentCard) continue;
         const sig = extractCardSignature(card);
+        if (!sig.vesselName || !sig.date || !sig.time) continue; // not comparable
+        comparedAgainstCount++;
         if (signaturesMatch(currentSig, sig)) {
-            return true;   // exact duplicate found
+            return { status: 'DUPLICATE' };   // exact duplicate found
         }
     }
 
-    return false;
+    // [FIX - v5.8] If none of the other cards yielded a comparable signature,
+    // no real comparison took place — report as unable to validate rather
+    // than silently passing.
+    if (comparedAgainstCount === 0) {
+        return {
+            status: 'UNABLE_TO_VALIDATE',
+            reason: 'No other report cards with a comparable signature (vessel/date/time) were found to compare against.'
+        };
+    }
+
+    return { status: 'UNIQUE' };
 }
 
 function extractReportContext() {
@@ -636,7 +678,7 @@ function locateBunkerRows() {
 
 async function validateCurrentReport() {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v5.7)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v5.8)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     let isValid = true;
@@ -644,13 +686,24 @@ async function validateCurrentReport() {
 
     // 1. DUPLICATE TIMESTAMP SCAN
     setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
-    if (checkIsDuplicateReport()) {
+    const dupCheck = checkIsDuplicateReport();
+
+    if (dupCheck.status === 'DUPLICATE') {
         const commentLogged = addValidationComment('Duplicate Report Detected');
         const commentResult = commentLogged
             ? 'Commented: "Duplicate Report Detected".'
             : 'Warning: Comment field unreachable.';
         setStatus(
             `🛑 LOCKOUT: Exact duplicate found in sidebar (vessel + report type + date + time all match). ${commentResult} Halted.`,
+            'error'
+        );
+        return false;
+    } else if (dupCheck.status === 'UNABLE_TO_VALIDATE') {
+        // [FIX - v5.8] No report data was available to compare against —
+        // this must not be auto-approved as "no duplicates found".
+        isValid = false;
+        setStatus(
+            `⚠️ Duplicate Scan: Unable to Validate — ${dupCheck.reason} Halted; load the report list and retry.`,
             'error'
         );
         return false;
@@ -1094,7 +1147,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v5.7)';
+    btn.innerText = '▶ Start Autopilot (v5.8)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -1134,7 +1187,7 @@ function setStatus(message, type = 'info') {
 function clearStatus() {
     const box = document.getElementById('autopilot-status');
     if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v5.7):</div>";
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v5.8):</div>";
     }
 }
 
@@ -1145,7 +1198,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v5.7)';
+        btn.innerText = '▶ Start Autopilot (v5.8)';
         btn.style.backgroundColor = '#2e7d32';
     }
 }
