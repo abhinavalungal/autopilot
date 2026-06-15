@@ -1,5 +1,5 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v5.6 (Location-Aware Validation)
+//   MARITIME REPORT AUTOPILOT — v5.7 (Departure-Aware + Duplicate Rewrite)
 //   Fixes & Upgrades applied:
 //     [FIX-1 to 7] Maintained core timeline engine stability fixes.
 //     [FIX-8] Connected bridge between DOM scrapers and compliance matrix.
@@ -16,6 +16,26 @@
 //     [FIX - v5.6-B] PORT WHITELIST: Added DISCHARGING and IDLE event types.
 //     [FIX - v5.6-C] LOCATION DETECTION: Report type now resolved from the actual
 //             Location dropdown value, preventing false "At Sea" context errors.
+//     [FIX - v5.7-A] DEPARTURE CONTEXT: When a "Start of Sea Passage" field is
+//             populated, the report covers both a port phase (pre-departure) and a
+//             sea phase. Both PORT and SEA event whitelists are now accepted for
+//             these mixed-period reports, eliminating false "unauthorized event"
+//             errors on valid departure Noon reports.
+//     [FIX - v5.7-B] CHRONOLOGICAL NAVIGATION: The sidebar lists reports in
+//             reverse-chronological order (newest at top). Autopilot previously
+//             searched downward (toward older reports) and wrapped to the top,
+//             causing it to jump to the newest pending report instead of the
+//             chronologically next one. Navigation now searches upward (toward
+//             lower DOM indices = newer dates), matching true processing order.
+//     [FIX - v5.7-C] DUPLICATE CHECKER REWRITE: The previous implementation only
+//             compared the timestamp of the current card against the immediately
+//             adjacent card. False positives occurred when active-card detection
+//             fell back to index 0 (always comparing the top two cards), and
+//             duplicates elsewhere in the list were missed. The new logic extracts
+//             a 4-field signature { reportType, vesselName, date, time } from every
+//             sidebar card and scans the ENTIRE list for a full match. A lockout
+//             fires only when ALL FOUR fields are identical. Comment text updated
+//             from "Duplicate Report" → "Duplicate Report Detected".
 // =========================================================================
 
 const CONFIG = {
@@ -170,60 +190,141 @@ function addValidationComment(commentText) {
 }
 
 // ---------------------------------------------------------------------------
-//   DUPLICATE TIMELINE SCANNER
+//   DUPLICATE TIMELINE SCANNER  [REWRITTEN v5.7-C]
+// ---------------------------------------------------------------------------
+// Extracts a 4-field identity signature from a sidebar card's text:
+//   { reportType, vesselName, date, time }
+// A duplicate is only triggered when ALL FOUR fields match another card in
+// the sidebar list. This prevents false positives from vessels that share a
+// timestamp but differ in name or report type.
 // ---------------------------------------------------------------------------
 
-function extractTimestampSignature(text) {
-    const lines = text.split('\n');
+function extractCardSignature(card) {
+    const raw = (card.innerText || '').trim();
+    const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
+
+    // Line 0: Report type  e.g. "Noon Report V101"
+    const reportType = lines[0] ? lines[0].replace(/[,.]$/, '').trim() : '';
+
+    // Line 1: Vessel name  e.g. "SUNNY APATITE,"
+    const vesselName = lines[1] ? lines[1].replace(/[,.]$/, '').trim().toUpperCase() : '';
+
+    // Find the line containing a full date+time pattern: "2026-06-09 12:00 +08:00"
+    // Also handles dd.mm.yyyy or dd/mm/yyyy separators for flexibility.
+    let date = '';
+    let time = '';
+    const dtPattern = /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\s+(\d{2}:\d{2})/;
     for (const line of lines) {
-        if (/\d{2}:\d{2}/.test(line)) {
-            return line.trim();
-        }
-    }
-    return null;
-}
-
-function checkIsDuplicateReport() {
-    const sidebarCards = queryAllContexts('.card, div[class*="card"], .report-item').filter(card => {
-        const text = card.innerText || '';
-        return text.includes('Report') || text.includes('Notice') || text.includes('Noon') || text.includes('Arrival');
-    });
-
-    if (sidebarCards.length < 2) return false;
-
-    let currentCard = null;
-    let nextCard = null;
-
-    for (let i = 0; i < sidebarCards.length; i++) {
-        const card = sidebarCards[i];
-        const isCurrent = card.classList.contains('active') || 
-                          card.classList.contains('p-highlight') || 
-                          card.classList.contains('selected') ||
-                          !(card.style.backgroundColor === 'rgb(255, 255, 255)' || 
-                            card.style.backgroundColor === 'transparent' || 
-                            window.getComputedStyle(card).backgroundColor === 'rgb(255, 255, 255)' ||
-                            window.getComputedStyle(card).backgroundColor === 'rgba(0, 0, 0, 0)');
-        
-        if (isCurrent && !currentCard) {
-            currentCard = card;
-            if (i + 1 < sidebarCards.length) {
-                nextCard = sidebarCards[i + 1];
-            }
+        const m = line.match(dtPattern);
+        if (m) {
+            date = m[1].replace(/[./]/g, '-');  // normalise separator to -
+            time = m[2];
             break;
         }
     }
 
-    if (!currentCard) {
-        currentCard = sidebarCards[0];
-        nextCard = sidebarCards[1];
+    return { reportType, vesselName, date, time };
+}
+
+function signaturesMatch(a, b) {
+    return (
+        a.reportType  !== '' && b.reportType  !== '' && a.reportType  === b.reportType  &&
+        a.vesselName  !== '' && b.vesselName  !== '' && a.vesselName  === b.vesselName  &&
+        a.date        !== '' && b.date        !== '' && a.date        === b.date        &&
+        a.time        !== '' && b.time        !== '' && a.time        === b.time
+    );
+}
+
+function checkIsDuplicateReport() {
+    // Collect all sidebar report cards
+    const sidebarCards = Array.from(
+        document.querySelectorAll('.card, div[class*="card"], .report-item, li[class*="report"]')
+    ).filter(card => {
+        const text = card.innerText || '';
+        return (
+            text.includes('Report')  ||
+            text.includes('Notice')  ||
+            text.includes('Noon')    ||
+            text.includes('Arrival') ||
+            text.includes('Departure')
+        );
+    });
+
+    if (sidebarCards.length < 2) return false;
+
+    // Identify the currently-open card using multiple heuristics (most reliable first)
+    const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
+                            'current', 'focused', 'open', 'p-listbox-item-selected'];
+
+    let currentCard = null;
+
+    // Pass 1: explicit active CSS class
+    for (const card of sidebarCards) {
+        if (ACTIVE_CLASSES.some(cls => card.classList.contains(cls))) {
+            currentCard = card;
+            break;
+        }
     }
 
-    if (!currentCard || !nextCard) return false;
+    // Pass 2: aria-selected="true"
+    if (!currentCard) {
+        for (const card of sidebarCards) {
+            if (card.getAttribute('aria-selected') === 'true') {
+                currentCard = card;
+                break;
+            }
+        }
+    }
 
-    const currentTS = extractTimestampSignature(currentCard.innerText || '');
-    const nextTS = extractTimestampSignature(nextCard.innerText || '');
+    // Pass 3: inline border style (blue outline = selected in PrimeNG/PrimeFaces)
+    if (!currentCard) {
+        for (const card of sidebarCards) {
+            const style = window.getComputedStyle(card);
+            const border = style.borderColor || '';
+            const outline = style.outlineColor || '';
+            if (border.includes('59, 130, 246') || border.includes('37, 99, 235') ||  // blue shades
+                outline.includes('59, 130, 246') || outline.includes('37, 99, 235')) {
+                currentCard = card;
+                break;
+            }
+        }
+    }
 
-    return (currentTS && nextTS && currentTS === nextTS);
+    // Pass 4: background-color differentiation (non-white = highlighted)
+    if (!currentCard) {
+        for (const card of sidebarCards) {
+            const bg = window.getComputedStyle(card).backgroundColor;
+            if (bg && bg !== 'rgb(255, 255, 255)' && bg !== 'rgba(0, 0, 0, 0)' &&
+                bg !== 'transparent' && bg !== '') {
+                currentCard = card;
+                break;
+            }
+        }
+    }
+
+    // Pass 5: last resort — treat first card as current (prevents silent skip)
+    if (!currentCard) {
+        currentCard = sidebarCards[0];
+    }
+
+    const currentSig = extractCardSignature(currentCard);
+
+    // Guard: if we couldn't extract a meaningful signature, skip duplicate check
+    // to avoid false lockouts (empty vessel name or missing date/time)
+    if (!currentSig.vesselName || !currentSig.date || !currentSig.time) {
+        return false;
+    }
+
+    // Scan ALL other cards for a full 4-field match
+    for (const card of sidebarCards) {
+        if (card === currentCard) continue;
+        const sig = extractCardSignature(card);
+        if (signaturesMatch(currentSig, sig)) {
+            return true;   // exact duplicate found
+        }
+    }
+
+    return false;
 }
 
 function extractReportContext() {
@@ -268,6 +369,56 @@ function extractReportContext() {
         }
     }
 
+    // [FIX v5.7-A] DEPARTURE CONTEXT DETECTION
+    // A Noon report covering a vessel departure has a populated "Start of Sea Passage"
+    // field. Its 24-hour period begins while the vessel is still in port and ends at sea,
+    // so the Events table legitimately contains BOTH port events (pre-departure) and sea
+    // events (post-departure). Detect this by checking for any visible, populated input
+    // whose id/name/label matches "Start of Sea Passage" / "SOSP".
+    let isDepartureReport = false;
+    if (reportType === 'At Sea NOON Report') {
+        outerLoop:
+        for (const ctx of getAllContexts()) {
+            if (!ctx) continue;
+
+            // Strategy A: find inputs by id/name attribute
+            const allInputs = Array.from(ctx.querySelectorAll('input'));
+            for (const inp of allInputs) {
+                const id   = (inp.id   || '').toLowerCase();
+                const name = (inp.name || '').toLowerCase();
+                if (
+                    id.includes('startsea')   || id.includes('sosp')   || id.includes('sea_passage') ||
+                    name.includes('startsea') || name.includes('sosp') || name.includes('sea_passage')
+                ) {
+                    if (inp.value && inp.value.trim() !== '') {
+                        isDepartureReport = true;
+                        break outerLoop;
+                    }
+                }
+            }
+
+            // Strategy B: find labels containing "Start of Sea Passage" then check nearby input
+            const labelEls = Array.from(ctx.querySelectorAll(
+                'label, span, div, legend, .p-column-title, .field-label, th'
+            ));
+            for (const lbl of labelEls) {
+                const txt = (lbl.innerText || '').toLowerCase();
+                if (txt.includes('start of sea passage') || txt.includes('sosp')) {
+                    const container =
+                        lbl.closest('.p-field, .field-group, tr, .form-row, fieldset') ||
+                        lbl.parentElement;
+                    if (container) {
+                        const nearbyInp = container.querySelector('input');
+                        if (nearbyInp && nearbyInp.value && nearbyInp.value.trim() !== '') {
+                            isDepartureReport = true;
+                            break outerLoop;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     const steamingInput = findSteamingHoursInput();
     const seaSteamingHours = steamingInput ? (parseFloat(steamingInput.value) || 0) : 24;
 
@@ -286,6 +437,7 @@ function extractReportContext() {
 
     return {
         reportType: reportType,
+        isDepartureReport: isDepartureReport,
         seaSteamingHours: seaSteamingHours,
         cargoQuantityBeforeTransit: cargoBefore,
         cargoQuantityAfterTransit: cargoAfter,
@@ -484,7 +636,7 @@ function locateBunkerRows() {
 
 async function validateCurrentReport() {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v5.6)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v5.7)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     let isValid = true;
@@ -493,12 +645,17 @@ async function validateCurrentReport() {
     // 1. DUPLICATE TIMESTAMP SCAN
     setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
     if (checkIsDuplicateReport()) {
-        const commentLogged = addValidationComment('Duplicate Report');
-        const commentResult = commentLogged ? 'Commented: "Duplicate Report".' : 'Warning: Comment field unreachable.';
-        setStatus(`🛑 LOCKOUT: Exact timeline duplicate matched with next report. ${commentResult} Halted.`, 'error');
+        const commentLogged = addValidationComment('Duplicate Report Detected');
+        const commentResult = commentLogged
+            ? 'Commented: "Duplicate Report Detected".'
+            : 'Warning: Comment field unreachable.';
+        setStatus(
+            `🛑 LOCKOUT: Exact duplicate found in sidebar (vessel + report type + date + time all match). ${commentResult} Halted.`,
+            'error'
+        );
         return false;
     } else {
-        setStatus('✅ Duplicate Scan: No concurrent timeline duplicates detected.', 'success');
+        setStatus('✅ Duplicate Scan: No matching duplicate found in the report list.', 'success');
     }
 
     // 2. PORT EVENTS BLOCK CHECK
@@ -741,9 +898,9 @@ async function approveReport() {
     yesBtn.click();
     
     // --- OVERRIDE INTERCEPTOR FOR ZERO DISTANCE WARNINGS ---
-    // Triggered only when the "Proceed Anyway" button is physically present in
-    // the DOM — prevents false positives from form field labels containing
-    // the words "observed distance".
+    // Only fires when the "Proceed Anyway" modal button is actually present on
+    // screen — prevents false positives from the word "observed distance"
+    // appearing elsewhere in the form body.
     setStatus('Evaluating modal chain for trailing warnings...', 'info');
     await sleep(800);
 
@@ -754,6 +911,7 @@ async function approveReport() {
     });
 
     if (proceedAnyway) {
+        // A "Proceed Anyway" modal is open — check context before clicking
         const contextData = extractReportContext();
         if (contextData.reportType === 'In Port Report') {
             setStatus('⚠️ Distance 0 warning caught in Port Context. Bypassing safely...', 'warning');
@@ -790,34 +948,52 @@ async function goToNextPendingReport() {
         return false;
     }
 
-    // Pending = white/transparent background (not yet approved).
-    // Active  = the card currently open; detected by non-white computed bg
-    //           OR standard active-state CSS classes.
+    // A card is "pending" (unapproved) when it has a white/transparent background.
+    // Approved cards have a coloured (green/teal) background set inline by the app.
     const isPending = card => {
-        const bg = window.getComputedStyle(card).backgroundColor;
-        return bg === 'rgb(255, 255, 255)' || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent';
+        const bgColor = window.getComputedStyle(card).backgroundColor;
+        return (
+            bgColor === 'rgb(255, 255, 255)' ||
+            bgColor === 'rgba(0, 0, 0, 0)' ||
+            bgColor === 'transparent'
+        );
     };
 
+    // The active card is the one currently selected — it typically has a
+    // non-white background (green/teal highlight). Find it by exclusion:
+    // it is NOT pending, or it carries an active/highlight class.
     const isActive = card =>
         card.classList.contains('active') ||
         card.classList.contains('p-highlight') ||
         card.classList.contains('selected') ||
-        !isPending(card);
+        !isPending(card);  // coloured bg = currently viewed card
 
     const currentIndex = sidebarCards.findIndex(isActive);
-    const searchFrom   = currentIndex >= 0 ? currentIndex + 1 : 0;
+
+    // [FIX v5.7-B] CHRONOLOGICAL NAVIGATION
+    // The sidebar renders reports in REVERSE chronological order:
+    //   index 0 = newest report (top),  last index = oldest report (bottom)
+    // Autopilot processes oldest-first, so "next" is always one step UPWARD
+    // (lower index = more recent date). The previous code searched downward
+    // (higher index = older) and its wrap-around returned to index 0 — the
+    // newest pending report — instead of the chronologically immediate next one.
+    const searchFrom = currentIndex >= 0 ? currentIndex - 1 : sidebarCards.length - 1;
     let nextPendingCard = null;
 
-    // Search forward from the card after the current one
-    for (let i = searchFrom; i < sidebarCards.length; i++) {
-        if (isPending(sidebarCards[i])) { nextPendingCard = sidebarCards[i]; break; }
+    // Search upward (toward newer reports / lower indices)
+    for (let i = searchFrom; i >= 0; i--) {
+        if (isPending(sidebarCards[i])) {
+            nextPendingCard = sidebarCards[i];
+            break;
+        }
     }
-    // Fallback: wrap from top if nothing ahead
+
+    // Fallback: nothing above — wrap from the bottom (oldest unapproved entry)
     if (!nextPendingCard) {
-        for (let i = 0; i < searchFrom; i++) {
+        for (let i = sidebarCards.length - 1; i > searchFrom; i--) {
             if (isPending(sidebarCards[i])) {
                 nextPendingCard = sidebarCards[i];
-                setStatus('ℹ️ No pending reports ahead — wrapping to earliest unapproved entry.', 'info');
+                setStatus('ℹ️ No pending reports ahead — wrapping to oldest unapproved entry.', 'info');
                 break;
             }
         }
@@ -839,32 +1015,36 @@ async function goToNextPendingReport() {
 // ---------------------------------------------------------------------------
 
 function isCurrentReportAlreadyApproved() {
-    // Detects approved state by presence of Re-Ingest / Open for Resubmit
-    // action buttons which only appear after a report is approved.
+    // Check for the "Approved" badge / Re Ingest / Open for Resubmit buttons
+    // that the app renders once a report has been approved.
     let screenText = '';
     getAllContexts().forEach(ctx => {
         if (ctx && ctx.body) screenText += ctx.body.innerText || '';
     });
-    return screenText.includes('Re Ingest') || screenText.includes('Open for Resubmit');
+    const hasApprovedBadge = queryAllContexts(
+        '.p-tag, .p-badge, [class*="approved"], [class*="status"]'
+    ).some(el => (el.innerText || '').trim().toLowerCase() === 'approved');
+
+    return hasApprovedBadge || (
+        screenText.includes('Re Ingest') || screenText.includes('Open for Resubmit')
+    );
 }
 
 async function runAutopilot() {
     try {
-        while (window.autopilotRunning) {
-            // If this report is already approved (e.g. user started autopilot
-            // while sitting on an approved report, or landed on one mid-sequence),
-            // skip straight to the next unapproved one.
-            if (isCurrentReportAlreadyApproved()) {
-                setStatus('⚠️ Report already approved — skipping to next unapproved...', 'warning');
-                const hasNext = await goToNextPendingReport();
-                if (!hasNext) {
-                    window.autopilotRunning = false;
-                    updateUIButton();
-                    break;
-                }
-                continue; // re-evaluate the newly loaded report
+        // If the user clicked Start while sitting on an already-approved report,
+        // navigate to the next unapproved one first without touching this report.
+        if (isCurrentReportAlreadyApproved()) {
+            setStatus('⚠️ Current report already approved. Jumping to next unapproved...', 'warning');
+            const hasNext = await goToNextPendingReport();
+            if (!hasNext) {
+                window.autopilotRunning = false;
+                updateUIButton();
+                return;
             }
+        }
 
+        while (window.autopilotRunning) {
             const isValid = await validateCurrentReport();
             if (!isValid) {
                 window.autopilotRunning = false;
@@ -914,7 +1094,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v5.6)';
+    btn.innerText = '▶ Start Autopilot (v5.7)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -923,11 +1103,6 @@ function injectControlPanel() {
     `;
 
     btn.addEventListener('click', () => {
-        // Debounce: ignore rapid double-clicks during async navigation sleeps
-        if (btn._clicking) return;
-        btn._clicking = true;
-        setTimeout(() => { btn._clicking = false; }, 600);
-
         window.autopilotRunning = !window.autopilotRunning;
         updateUIButton();
         if (window.autopilotRunning) {
@@ -959,7 +1134,7 @@ function setStatus(message, type = 'info') {
 function clearStatus() {
     const box = document.getElementById('autopilot-status');
     if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v5.5):</div>";
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v5.7):</div>";
     }
 }
 
@@ -970,7 +1145,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v5.6)';
+        btn.innerText = '▶ Start Autopilot (v5.7)';
         btn.style.backgroundColor = '#2e7d32';
     }
 }
@@ -1050,7 +1225,9 @@ class GeoformsTimelineValidator {
     }
 
     applyAutomations(reportContext, eventRows) {
-        if (reportContext.reportType === 'At Sea NOON Report') {
+        // [FIX v5.7-A] Skip sea automations for departure reports — the period
+        // includes a port phase, so zeroing steaming hours would be incorrect.
+        if (reportContext.reportType === 'At Sea NOON Report' && !reportContext.isDepartureReport) {
             const hasDriftingOrStoppage = eventRows.some(
                 row =>
                     row.eventType === 'Drifting' ||
@@ -1065,14 +1242,41 @@ class GeoformsTimelineValidator {
 
     validateWhitelists(reportContext, row, result) {
         if (reportContext.reportType === 'At Sea NOON Report') {
-            const match = this.SEA_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
-            if (!match) {
-                result.errors.push(`Row [${row.eventType}] is unauthorized inside an 'At Sea' report context.`);
+            // [FIX v5.7-A] DEPARTURE REPORT EXCEPTION
+            // When the vessel departed during this period, the Events table legitimately
+            // contains port-phase events before the SOSP, followed by sea-phase events.
+            // Accept either whitelist; unknown event types still fail.
+            if (reportContext.isDepartureReport) {
+                const matchSea  = this.SEA_EVENTS_WHITELIST.some(
+                    e => e.toLowerCase() === row.eventType.toLowerCase()
+                );
+                const matchPort = this.PORT_EVENTS_WHITELIST.some(
+                    e => e.toLowerCase() === row.eventType.toLowerCase()
+                );
+                if (!matchSea && !matchPort) {
+                    result.errors.push(
+                        `Row [${row.eventType}] is unauthorized in this Departure (mixed port/sea) report context.`
+                    );
+                }
+            } else {
+                // Pure At Sea NOON — only sea events allowed
+                const match = this.SEA_EVENTS_WHITELIST.some(
+                    e => e.toLowerCase() === row.eventType.toLowerCase()
+                );
+                if (!match) {
+                    result.errors.push(
+                        `Row [${row.eventType}] is unauthorized inside an 'At Sea' report context.`
+                    );
+                }
             }
         } else {
-            const match = this.PORT_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
+            const match = this.PORT_EVENTS_WHITELIST.some(
+                e => e.toLowerCase() === row.eventType.toLowerCase()
+            );
             if (!match) {
-                result.errors.push(`Row [${row.eventType}] is unauthorized inside an 'In Port' or 'Arrival/Departure' context.`);
+                result.errors.push(
+                    `Row [${row.eventType}] is unauthorized inside an 'In Port' or 'Arrival/Departure' context.`
+                );
             }
         }
     }
@@ -1134,7 +1338,8 @@ class GeoformsTimelineValidator {
     }
 
     checkScenario08_AtSeaNoon(reportContext, row, result) {
-        if (reportContext.reportType === 'At Sea NOON Report') {
+        // [FIX v5.7-A] Skip for departure reports — steaming hours span a mixed period.
+        if (reportContext.reportType === 'At Sea NOON Report' && !reportContext.isDepartureReport) {
             if (
                 row.eventType.toLowerCase() === 'drifting' ||
                 row.eventType.toLowerCase() === 'stoppage for safety reasons'
