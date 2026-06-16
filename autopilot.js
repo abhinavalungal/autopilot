@@ -1,5 +1,5 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v5.8 (Honest Duplicate Scan)
+//   MARITIME REPORT AUTOPILOT — v5.9 (ADJ Cross-Report Reconciliation)
 //   Fixes & Upgrades applied:
 //     [FIX-1 to 7] Maintained core timeline engine stability fixes.
 //     [FIX-8] Connected bridge between DOM scrapers and compliance matrix.
@@ -29,23 +29,76 @@
 //             lower DOM indices = newer dates), matching true processing order.
 //     [FIX - v5.7-C] DUPLICATE CHECKER REWRITE: The previous implementation only
 //             compared the timestamp of the current card against the immediately
-//             adjacent card. False positives occurred when active-card detection
-//             fell back to index 0 (always comparing the top two cards), and
-//             duplicates elsewhere in the list were missed. The new logic extracts
-//             a 4-field signature { reportType, vesselName, date, time } from every
-//             sidebar card and scans the ENTIRE list for a full match. A lockout
-//             fires only when ALL FOUR fields are identical. Comment text updated
-//             from "Duplicate Report" → "Duplicate Report Detected".
-//     [FIX - v5.8] HONEST DUPLICATE SCAN: Previously, checkIsDuplicateReport()
-//             returned `false` ("no duplicate") in cases where it actually had
-//             NO DATA to compare against — fewer than 2 sidebar cards, an
-//             unreadable active-card signature, or zero comparable other cards.
-//             This silently auto-passed the Duplicate Scan with a green checkmark
-//             even though no real comparison occurred. The function now returns
-//             a tri-state result: DUPLICATE (lockout), UNIQUE (a real comparison
-//             ran and found no match), or UNABLE_TO_VALIDATE (no usable report
-//             data available). UNABLE_TO_VALIDATE now halts the run with an error
-//             status instead of being reported as a pass.
+//             adjacent card. A 4-field signature { reportType, vesselName, date,
+//             time } from every sidebar card was used to scan the ENTIRE list
+//             for a full match.
+//     [FIX - v5.8-A] CURRENT-CARD DETECTION OVERHAUL: The old "non-white
+//             background = selected" heuristic mistook APPROVED (green) and
+//             REJECTED (red/pink) status cards for the active card whenever the
+//             active card's highlight border colour didn't exactly match one of
+//             two hardcoded blue hex values. Border/outline/box-shadow detection
+//             is now a general "blue-ish hue" test, and the background-colour
+//             fallback explicitly excludes green/red status colours.
+//     [FIX - v5.8-B] 5-FIELD DUPLICATE SIGNATURE: Added a "routeInfo" field
+//             (voyage number + port/location text) to the duplicate signature.
+//             Two reports that merely share { reportType, vesselName, date,
+//             time } but differ in voyage number / port are NO LONGER treated
+//             as duplicates — this was the root cause of false-positive
+//             lockouts (e.g. an Arrival Report on Voy 326/Brooklyn vs an
+//             Arrival Report on Voy 32026/N-A sharing the same date+time).
+//     [FIX - v5.8-C] NO MORE REMARKS-FIELD WRITES: Removed addValidationComment(),
+//             which previously matched the report form's own "Remarks" field
+//             (id/name containing "remark"). Duplicate handling no longer writes
+//             anything into the report body.
+//     [UPGRADE - v5.8-D] REJECT-ON-DUPLICATE FLOW: When a genuine duplicate is
+//             found, the autopilot now clicks "Reject", fills the rejection
+//             reason field INSIDE the resulting confirmation dialog only (never
+//             the page's Remarks field) with a message describing exactly which
+//             existing report it matched, then confirms the rejection.
+//     [UPGRADE - v5.8-E] VERBOSE DUPLICATE AUDIT LOGS: On a duplicate lockout,
+//             the log now prints the full signature of BOTH the current report
+//             and the matched existing report (type, vessel, route/voyage, date,
+//             time) for fast troubleshooting.
+//     [FIX - v5.9] ADJ VALIDATION OVERHAUL: The previous "ADJ must be exactly 0"
+//             rule rejected any non-zero ADJ outright WITHOUT checking it against
+//             anything, and a separate same-report Last-ROB-vs-ROB-Start check
+//             ignored ADJ entirely — together these meant ADJ was effectively
+//             never properly validated (reports with ADJ = 0 sailed through with
+//             no real check performed at all). ADJ is now reconciled against the
+//             vessel's adjacent reports:
+//               - This report's "Last ROB" must continue from the PREVIOUS
+//                 report's "ROB Start" for the same vessel.
+//               - This report's "ROB Start + ADJ" must equal the NEXT report's
+//                 "Last ROB" for the same vessel — the real test of whether the
+//                 ADJ entered here is correct.
+//             If no future (next chronological) report exists for this vessel,
+//             ADJ cannot be reconciled. The autopilot now HALTS in that case —
+//             reporting "No future report is available for validation. Reporting
+//             appears to be complete for this vessel." — and does NOT auto-approve
+//             based on the missing data.
+//     [FIX - v5.9-A] ADJ ROW MATCHING HARDENED: fuel-row matching between the
+//             current report and the next report's bunker grid previously
+//             relied on exact label-text equality. Any cosmetic difference in
+//             rendered label text (whitespace, footnote markers, or a
+//             positional fallback label like "Line 1") caused the match to
+//             silently fail, which skipped the entire ADJ reconciliation check
+//             with NO warning — a non-zero, incorrect ADJ could pass through
+//             unexamined. Labels are now normalised (footnote/whitespace/case
+//             insensitive) and a row-position fallback is used if no label
+//             match is found. If ADJ is non-zero and STILL can't be matched to
+//             any row in the next report, that is now a hard validation
+//             failure instead of a silent skip.
+//     [NEW - v5.10] AT-SEA STEAMING HOURS ELAPSED-TIME CHECK: for "At Sea
+//             (N/A)" reports, Steaming Hours is no longer checked only against
+//             a static 16-26hr range. The bot now finds the nearest already-
+//             CHECKED (green) sidebar card for the same vessel, computes the
+//             true elapsed time between that report's timestamp and the
+//             current report's timestamp (both converted to real UTC instants
+//             using each report's own UTC offset, e.g. +07:00 vs +08:00), and
+//             flags a warning if the reported Steaming Hours doesn't match
+//             that actual elapsed time. This correctly handles cases where a
+//             vessel crosses a timezone boundary between reports (e.g. 24hrs
+//             on the clock but only 23 actual elapsed hours).
 // =========================================================================
 
 const CONFIG = {
@@ -55,6 +108,7 @@ const CONFIG = {
     STEAMING_HOURS_IN_PORT_MIN: 0,
     STEAMING_HOURS_IN_PORT_MAX: 24,
     ADJ_TOLERANCE: 0.01,
+    STEAMING_HOURS_ELAPSED_TOLERANCE: 0.1, // hrs; allows small rounding slack
     SLEEP_POLL_MS: 500,
     SLEEP_POST_CLICK_MS: 1200,
     DOM_STABLE_HEADSTART_MS: 400,
@@ -179,34 +233,67 @@ function findSteamingHoursInput() {
     return null;
 }
 
-function addValidationComment(commentText) {
-    const commentField = queryAllContexts('textarea, input[type="text"]').find(el => {
-        const id = (el.id || '').toLowerCase();
-        const name = (el.name || '').toLowerCase();
-        const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-        return id.includes('comment') || id.includes('remark') || id.includes('reason') || 
-               name.includes('comment') || name.includes('remark') || 
-               ph.includes('comment') || ph.includes('remark');
-    });
+// ---------------------------------------------------------------------------
+//   COLOUR HEURISTICS
+// ---------------------------------------------------------------------------
+// Used to identify the "active/selected" sidebar card without relying on a
+// small hardcoded set of exact hex values, and to avoid mistaking status
+// colours (approved = green, rejected = red/pink) for the selection highlight.
+// ---------------------------------------------------------------------------
 
-    if (commentField) {
-        commentField.value = commentText;
-        commentField.dispatchEvent(new Event('input', { bubbles: true }));
-        commentField.dispatchEvent(new Event('change', { bubbles: true }));
-        commentField.style.cssText = 'border: 2px solid #ff9800 !important; background-color: #fff3e0 !important;';
-        return true;
-    }
-    return false;
+function parseRgb(colorStr) {
+    if (!colorStr) return null;
+    const m = colorStr.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (!m) return null;
+    return { r: parseInt(m[1], 10), g: parseInt(m[2], 10), b: parseInt(m[3], 10) };
+}
+
+// True if the colour reads as a "selection" blue (blue channel clearly dominant).
+function isBlueish(colorStr) {
+    const rgb = parseRgb(colorStr);
+    if (!rgb) return false;
+    const { r, g, b } = rgb;
+    return b > 100 && (b - r) > 15 && (b - g) > 10;
+}
+
+// True if the colour reads as a status colour: green (approved) or red/pink (rejected).
+// Used to EXCLUDE these from "selected card" background heuristics.
+function isStatusColor(colorStr) {
+    const rgb = parseRgb(colorStr);
+    if (!rgb) return false;
+    const { r, g, b } = rgb;
+    const isGreenish = (g - r) > 10 && (g - b) > 10;
+    const isReddish  = (r - g) > 10 && (r - b) > 10;
+    return isGreenish || isReddish;
+}
+
+// True if the colour reads as "checked/approved" green specifically (not red).
+// Checks the same green channel dominance rule as isStatusColor but isolates
+// just the green case, since steaming-hours validation needs to distinguish
+// "already checked" (green) cards from everything else.
+function isGreenish(colorStr) {
+    const rgb = parseRgb(colorStr);
+    if (!rgb) return false;
+    const { r, g, b } = rgb;
+    return (g - r) > 10 && (g - b) > 10;
+}
+
+// Returns true if a sidebar card is marked "checked" (green border/background).
+// Checks both the border-color and background-color so it works whether the
+// UI signals "checked" via a green outline, a green fill, or both.
+function isCardChecked(card) {
+    const style = window.getComputedStyle(card);
+    return isGreenish(style.borderColor) || isGreenish(style.backgroundColor);
 }
 
 // ---------------------------------------------------------------------------
-//   DUPLICATE TIMELINE SCANNER  [REWRITTEN v5.7-C]
+//   DUPLICATE TIMELINE SCANNER  [REWRITTEN v5.7-C, HARDENED v5.8-A/B]
 // ---------------------------------------------------------------------------
-// Extracts a 4-field identity signature from a sidebar card's text:
-//   { reportType, vesselName, date, time }
-// A duplicate is only triggered when ALL FOUR fields match another card in
-// the sidebar list. This prevents false positives from vessels that share a
-// timestamp but differ in name or report type.
+// Extracts a 5-field identity signature from a sidebar card's text:
+//   { reportType, vesselName, date, time, routeInfo }
+// "routeInfo" captures the voyage number + port/location text that appears
+// between the vessel name line and the date/time line. A duplicate is only
+// triggered when ALL applicable fields match another card in the sidebar.
 // ---------------------------------------------------------------------------
 
 function extractCardSignature(card) {
@@ -221,39 +308,77 @@ function extractCardSignature(card) {
 
     // Find the line containing a full date+time pattern: "2026-06-09 12:00 +08:00"
     // Also handles dd.mm.yyyy or dd/mm/yyyy separators for flexibility.
+    // [v5.10] Also captures the trailing UTC offset (e.g. "+07:00", "-05:30")
+    // when present on the same line, since cross-report elapsed-time
+    // calculations need the real instant in time, not just the local clock
+    // reading — two reports logged at "12:00" in different offsets are NOT
+    // 24 hours apart.
     let date = '';
     let time = '';
-    const dtPattern = /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\s+(\d{2}:\d{2})/;
-    for (const line of lines) {
-        const m = line.match(dtPattern);
+    let utcOffset = ''; // e.g. "+07:00"; '' if not found on the line
+    let dateLineIndex = -1;
+    const dtPattern = /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\s+(\d{2}:\d{2})(?:[:\d]*)?\s*([+-]\d{2}:?\d{2})?/;
+    for (let i = 0; i < lines.length; i++) {
+        const m = lines[i].match(dtPattern);
         if (m) {
             date = m[1].replace(/[./]/g, '-');  // normalise separator to -
             time = m[2];
+            if (m[3]) {
+                // Normalise "+0700" -> "+07:00" so it's always Date()-parseable.
+                utcOffset = m[3].length === 5 ? `${m[3].slice(0, 3)}:${m[3].slice(3)}` : m[3];
+            }
+            dateLineIndex = i;
             break;
         }
     }
 
-    return { reportType, vesselName, date, time };
+    // [v5.8-B] Capture voyage number / port-location info: any lines between
+    // the vessel name line and the date/time line. e.g. "Voy 032026, BROOKLYN
+    // (UNITED STATES)" — normalised so wrapping/punctuation differences don't
+    // affect comparison.
+    let routeInfo = '';
+    if (dateLineIndex > 1) {
+        routeInfo = lines.slice(2, dateLineIndex)
+            .join(' ')
+            .replace(/[,.]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toUpperCase();
+    }
+
+    return { reportType, vesselName, date, time, utcOffset, routeInfo, rawText: raw };
 }
 
+// A duplicate requires the core 4 fields to match AND, if either card has
+// route info (voyage number / port), that info must match too. This prevents
+// two different reports (different voyage / different port) that happen to
+// share { reportType, vesselName, date, time } from being flagged as the
+// same report.
 function signaturesMatch(a, b) {
-    return (
+    const coreMatch = (
         a.reportType  !== '' && b.reportType  !== '' && a.reportType  === b.reportType  &&
         a.vesselName  !== '' && b.vesselName  !== '' && a.vesselName  === b.vesselName  &&
         a.date        !== '' && b.date        !== '' && a.date        === b.date        &&
         a.time        !== '' && b.time        !== '' && a.time        === b.time
     );
+
+    if (!coreMatch) return false;
+
+    if (a.routeInfo || b.routeInfo) {
+        return a.routeInfo === b.routeInfo;
+    }
+
+    return true;
 }
 
-// [FIX - v5.8] DUPLICATE SCAN RESULT STATES
-// checkIsDuplicateReport() now returns an object: { status, reason }
-//   status: 'DUPLICATE'           -> exact 4-field match found -> lockout
-//           'UNIQUE'               -> a real comparison was performed against
-//                                     at least one other card and no match was found
-//           'UNABLE_TO_VALIDATE'   -> no usable report data was available to
-//                                     compare against (no sidebar, no signature,
-//                                     or no comparable cards). This must NOT be
-//                                     treated as a pass.
+function describeSignature(sig) {
+    return `[${sig.reportType || 'Unknown type'}] ${sig.vesselName || 'Unknown vessel'}`
+        + (sig.routeInfo ? ` — ${sig.routeInfo}` : '')
+        + ` — ${sig.date || '????-??-??'} ${sig.time || '??:??'}`;
+}
+
+// Returns null if no duplicate is found, otherwise an object describing the
+// current report's signature and the matched existing report's signature.
 function checkIsDuplicateReport() {
     // Collect all sidebar report cards
     const sidebarCards = Array.from(
@@ -269,12 +394,7 @@ function checkIsDuplicateReport() {
         );
     });
 
-    if (sidebarCards.length < 2) {
-        return {
-            status: 'UNABLE_TO_VALIDATE',
-            reason: `Only ${sidebarCards.length} report card(s) detected in the sidebar — no report list is loaded/accessible to compare against.`
-        };
-    }
+    if (sidebarCards.length < 2) return null;
 
     // Identify the currently-open card using multiple heuristics (most reliable first)
     const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
@@ -300,26 +420,34 @@ function checkIsDuplicateReport() {
         }
     }
 
-    // Pass 3: inline border style (blue outline = selected in PrimeNG/PrimeFaces)
+    // Pass 3 [v5.8-A]: highlight border / outline / box-shadow reading as
+    // "selection blue" — a general hue test rather than two hardcoded hex
+    // values, so it correctly catches whatever blue this app's theme uses.
     if (!currentCard) {
         for (const card of sidebarCards) {
             const style = window.getComputedStyle(card);
-            const border = style.borderColor || '';
-            const outline = style.outlineColor || '';
-            if (border.includes('59, 130, 246') || border.includes('37, 99, 235') ||  // blue shades
-                outline.includes('59, 130, 246') || outline.includes('37, 99, 235')) {
+            if (
+                isBlueish(style.borderColor) ||
+                isBlueish(style.outlineColor) ||
+                isBlueish(style.boxShadow)
+            ) {
                 currentCard = card;
                 break;
             }
         }
     }
 
-    // Pass 4: background-color differentiation (non-white = highlighted)
+    // Pass 4 [v5.8-A]: background-colour differentiation (non-white,
+    // non-transparent = highlighted) — EXCLUDING green (approved) and
+    // red/pink (rejected) status colours, which previously caused this pass
+    // to mis-identify an approved/rejected card as the "active" one.
     if (!currentCard) {
         for (const card of sidebarCards) {
             const bg = window.getComputedStyle(card).backgroundColor;
-            if (bg && bg !== 'rgb(255, 255, 255)' && bg !== 'rgba(0, 0, 0, 0)' &&
-                bg !== 'transparent' && bg !== '') {
+            if (
+                bg && bg !== 'rgb(255, 255, 255)' && bg !== 'rgba(0, 0, 0, 0)' &&
+                bg !== 'transparent' && !isStatusColor(bg)
+            ) {
                 currentCard = card;
                 break;
             }
@@ -333,41 +461,27 @@ function checkIsDuplicateReport() {
 
     const currentSig = extractCardSignature(currentCard);
 
-    // [FIX - v5.8] If we couldn't extract a meaningful signature from the
-    // active card, we have no basis for comparison — this is NOT a "no
-    // duplicate" pass, it's an inability to validate.
+    // Guard: if we couldn't extract a meaningful signature, skip duplicate check
+    // to avoid false lockouts (empty vessel name or missing date/time)
     if (!currentSig.vesselName || !currentSig.date || !currentSig.time) {
-        return {
-            status: 'UNABLE_TO_VALIDATE',
-            reason: 'Could not extract a valid identity signature (vessel name, date, and time) from the active report card.'
-        };
+        return null;
     }
 
-    // Scan ALL other cards for a full 4-field match, while tracking whether
-    // any other card actually yielded a comparable signature.
-    let comparedAgainstCount = 0;
+    // Scan ALL other cards for a full signature match
     for (const card of sidebarCards) {
         if (card === currentCard) continue;
         const sig = extractCardSignature(card);
-        if (!sig.vesselName || !sig.date || !sig.time) continue; // not comparable
-        comparedAgainstCount++;
         if (signaturesMatch(currentSig, sig)) {
-            return { status: 'DUPLICATE' };   // exact duplicate found
+            return { currentSig, matchedSig: sig };
         }
     }
 
-    // [FIX - v5.8] If none of the other cards yielded a comparable signature,
-    // no real comparison took place — report as unable to validate rather
-    // than silently passing.
-    if (comparedAgainstCount === 0) {
-        return {
-            status: 'UNABLE_TO_VALIDATE',
-            reason: 'No other report cards with a comparable signature (vessel/date/time) were found to compare against.'
-        };
-    }
-
-    return { status: 'UNIQUE' };
+    return null;
 }
+
+// ---------------------------------------------------------------------------
+//   REPORT CONTEXT EXTRACTION
+// ---------------------------------------------------------------------------
 
 function extractReportContext() {
     let reportType = "In Port Report";
@@ -673,6 +787,242 @@ function locateBunkerRows() {
 }
 
 // ---------------------------------------------------------------------------
+//   VESSEL TIMELINE & CROSS-REPORT ADJ HELPERS  [FIX v5.9]
+// ---------------------------------------------------------------------------
+
+// Returns the full set of sidebar report cards (same filter used elsewhere).
+function getAllReportCards() {
+    return Array.from(
+        document.querySelectorAll('.card, div[class*="card"], .report-item, li[class*="report"]')
+    ).filter(card => {
+        const text = card.innerText || '';
+        return (
+            text.includes('Report')  ||
+            text.includes('Notice')  ||
+            text.includes('Noon')    ||
+            text.includes('Arrival') ||
+            text.includes('Departure')
+        );
+    });
+}
+
+// Identifies the currently-open sidebar card using the same multi-pass
+// heuristics as the duplicate checker (active class -> aria-selected ->
+// blue-ish highlight -> non-status background -> first card as last resort).
+function identifyCurrentCard(sidebarCards) {
+    const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
+                            'current', 'focused', 'open', 'p-listbox-item-selected'];
+
+    for (const card of sidebarCards) {
+        if (ACTIVE_CLASSES.some(cls => card.classList.contains(cls))) return card;
+    }
+    for (const card of sidebarCards) {
+        if (card.getAttribute('aria-selected') === 'true') return card;
+    }
+    for (const card of sidebarCards) {
+        const style = window.getComputedStyle(card);
+        if (isBlueish(style.borderColor) || isBlueish(style.outlineColor) || isBlueish(style.boxShadow)) {
+            return card;
+        }
+    }
+    for (const card of sidebarCards) {
+        const bg = window.getComputedStyle(card).backgroundColor;
+        if (bg && bg !== 'rgb(255, 255, 255)' && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent' && !isStatusColor(bg)) {
+            return card;
+        }
+    }
+    return sidebarCards[0] || null;
+}
+
+// Converts a card signature's { date, time, utcOffset } into a true UTC
+// epoch value (milliseconds), so elapsed-time math between two reports is
+// correct even when their UTC offsets differ. Falls back to treating the
+// timestamp as UTC if no offset was captured on the card (better than
+// silently using the browser's local zone, which would be wrong for a
+// server-side audit of a vessel's logged times).
+// Returns NaN if the signature lacks a usable date/time.
+function reportTimestamp(sig) {
+    if (!sig || !sig.date || !sig.time) return NaN;
+    const offset = sig.utcOffset || '+00:00';
+    return new Date(`${sig.date}T${sig.time}:00${offset}`).getTime();
+}
+
+// Given the current report's signature, scans the sidebar for the
+// chronologically nearest PREVIOUS and FUTURE report cards belonging to the
+// SAME vessel. Returns { previousCard, futureCard } — either may be null.
+function findAdjacentVesselReports(currentSig, sidebarCards, currentCard) {
+    const currentTs = reportTimestamp(currentSig);
+
+    let previousCard = null, previousTs = -Infinity;
+    let futureCard = null, futureTs = Infinity;
+
+    if (isNaN(currentTs)) return { previousCard, futureCard };
+
+    for (const card of sidebarCards) {
+        if (card === currentCard) continue;
+        const sig = extractCardSignature(card);
+        if (!sig.vesselName || sig.vesselName !== currentSig.vesselName) continue;
+
+        const ts = reportTimestamp(sig);
+        if (isNaN(ts) || ts === currentTs) continue;
+
+        if (ts < currentTs && ts > previousTs) {
+            previousTs = ts;
+            previousCard = card;
+        } else if (ts > currentTs && ts < futureTs) {
+            futureTs = ts;
+            futureCard = card;
+        }
+    }
+
+    return { previousCard, futureCard };
+}
+
+// Given the current report's signature, scans the sidebar for the
+// chronologically nearest CHECKED (green) report card belonging to the SAME
+// vessel, searching both backward and forward in time and returning
+// whichever is closer. Used by the At-Sea steaming-hours elapsed-time check,
+// which needs a known-good reference point to measure against.
+// Returns { card, sig, direction } or null if no checked card exists for
+// this vessel.
+function findNearestCheckedCard(currentSig, sidebarCards, currentCard) {
+    const currentTs = reportTimestamp(currentSig);
+    if (isNaN(currentTs)) return null;
+
+    let best = null;
+    let bestDelta = Infinity;
+
+    for (const card of sidebarCards) {
+        if (card === currentCard) continue;
+        if (!isCardChecked(card)) continue;
+
+        const sig = extractCardSignature(card);
+        if (!sig.vesselName || sig.vesselName !== currentSig.vesselName) continue;
+
+        const ts = reportTimestamp(sig);
+        if (isNaN(ts)) continue;
+
+        const delta = Math.abs(ts - currentTs);
+        if (delta < bestDelta) {
+            bestDelta = delta;
+            best = { card, sig, direction: ts < currentTs ? 'previous' : 'next' };
+        }
+    }
+
+    return best;
+}
+
+
+// one entry per fuel-type row with { fuelTypeLabel, lastRob, robStart, adj }
+// plus references to the live input/cell elements (for highlighting) when
+// the snapshot is taken for the report currently on screen.
+function scrapeBunkerSnapshot() {
+    const bunkerRows = locateBunkerRows();
+    const snapshot = [];
+
+    bunkerRows.forEach((row, index) => {
+        const cells = Array.from(row.querySelectorAll('td'));
+        const rawLabel = (cells[0] && cells[0].innerText.trim().split('\n')[0]) || '';
+        // Normalised join key: strips footnote markers/asterisks, collapses
+        // whitespace, uppercases — so cosmetic render differences between
+        // the current/previous/future page loads don't break row matching.
+        const normalisedLabel = rawLabel.replace(/[*†‡\d]+$/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
+        const fuelTypeLabel = normalisedLabel || `__ROW_${index}`;
+        const displayLabel = rawLabel || `Line ${index + 1}`;
+
+        let lastRobInput = null;
+        let robStartInput = null;
+        let adjInput = null;
+        let adjStaticVal = 0;
+        let hasAdjColumn = false;
+        let adjElementToHighlight = null;
+
+        cells.forEach(cell => {
+            const titleEl = cell.querySelector('.p-column-title');
+            const titleText = titleEl ? titleEl.innerText.toLowerCase().trim() : '';
+            const input = cell.querySelector('input');
+
+            const inputId = input ? (input.id || '').toLowerCase() : '';
+            const inputName = input ? (input.name || '').toLowerCase() : '';
+
+            if (titleText.includes('last rob') || titleText.includes('previous') || inputId.includes('lastrob') || inputName.includes('last_rob')) {
+                if (input) lastRobInput = input;
+            } else if (titleText.includes('rob start') || titleText.includes('start') || inputId.includes('robstart') || inputName.includes('rob_start')) {
+                if (input) robStartInput = input;
+            } else if (titleText.includes('adj') || titleText.includes('adjustment') || inputId.includes('adj') || inputName.includes('adjustment')) {
+                hasAdjColumn = true;
+                if (input) {
+                    adjInput = input;
+                    adjElementToHighlight = input;
+                } else {
+                    const cellCleanText = cell.innerText.replace(titleEl ? titleEl.innerText : '', '').trim();
+                    adjStaticVal = parseFloat(cellCleanText.replace(/,/g, '')) || 0;
+                    adjElementToHighlight = cell;
+                }
+            }
+        });
+
+        if (!lastRobInput || !robStartInput) {
+            const rowInputs = cells.map(c => c.querySelector('input')).filter(inp => inp && inp.type !== 'hidden' && !inp.disabled);
+            if (rowInputs.length >= 2) {
+                lastRobInput = lastRobInput || rowInputs[0];
+                robStartInput = robStartInput || rowInputs[1];
+            }
+        }
+
+        let finalAdjValue = 0;
+        if (adjInput) {
+            finalAdjValue = parseFloat(adjInput.value.replace(/,/g, '').trim()) || 0;
+        } else if (hasAdjColumn) {
+            finalAdjValue = adjStaticVal;
+        }
+
+        const lastRobVal = (lastRobInput && lastRobInput.value.trim() !== '')
+            ? (parseFloat(lastRobInput.value.replace(/,/g, '').trim()) || 0)
+            : null;
+        const robStartVal = (robStartInput && robStartInput.value.trim() !== '')
+            ? (parseFloat(robStartInput.value.replace(/,/g, '').trim()) || 0)
+            : null;
+
+        snapshot.push({
+            fuelTypeLabel,
+            displayLabel,
+            rowIndex: index,
+            lastRobInput,
+            robStartInput,
+            adjInput,
+            adjElementToHighlight,
+            hasAdjColumn,
+            lastRob: lastRobVal,
+            robStart: robStartVal,
+            adj: finalAdjValue
+        });
+    });
+
+    return snapshot;
+}
+
+// ---------------------------------------------------------------------------
+//   DIALOG / MODAL HELPERS
+// ---------------------------------------------------------------------------
+
+// Returns the currently visible modal/dialog element, if any. Used to scope
+// "reason for rejection" field lookups so they NEVER touch the report form's
+// own Remarks field.
+function findOpenDialog() {
+    const candidates = queryAllContexts(
+        '.p-dialog, [role="dialog"], .modal, .p-confirm-dialog, .p-overlaypanel'
+    );
+    for (const el of candidates) {
+        const style = window.getComputedStyle(el);
+        if (style.display !== 'none' && style.visibility !== 'hidden' && el.offsetParent !== null) {
+            return el;
+        }
+    }
+    return null;
+}
+
+// ---------------------------------------------------------------------------
 //   CORE VALIDATION RUNNER WITH VERBOSE AUDITING
 // ---------------------------------------------------------------------------
 
@@ -684,28 +1034,26 @@ async function validateCurrentReport() {
     let isValid = true;
     const errors = [];
 
-    // 1. DUPLICATE TIMESTAMP SCAN
+    // 1. DUPLICATE TIMESTAMP SCAN  [v5.8 hardened]
     setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
-    const dupCheck = checkIsDuplicateReport();
+    const duplicateMatch = checkIsDuplicateReport();
+    if (duplicateMatch) {
+        const { currentSig, matchedSig } = duplicateMatch;
 
-    if (dupCheck.status === 'DUPLICATE') {
-        const commentLogged = addValidationComment('Duplicate Report Detected');
-        const commentResult = commentLogged
-            ? 'Commented: "Duplicate Report Detected".'
-            : 'Warning: Comment field unreachable.';
-        setStatus(
-            `🛑 LOCKOUT: Exact duplicate found in sidebar (vessel + report type + date + time all match). ${commentResult} Halted.`,
-            'error'
-        );
-        return false;
-    } else if (dupCheck.status === 'UNABLE_TO_VALIDATE') {
-        // [FIX - v5.8] No report data was available to compare against —
-        // this must not be auto-approved as "no duplicates found".
-        isValid = false;
-        setStatus(
-            `⚠️ Duplicate Scan: Unable to Validate — ${dupCheck.reason} Halted; load the report list and retry.`,
-            'error'
-        );
+        setStatus('🛑 LOCKOUT: Duplicate report detected.', 'error');
+        setStatus(`   Current report:  ${describeSignature(currentSig)}`, 'error');
+        setStatus(`   Matches existing report:  ${describeSignature(matchedSig)}`, 'error');
+
+        const rejectionMessage =
+            `Duplicate Report Detected: this report (${describeSignature(currentSig)}) ` +
+            `matches an existing report already on file (${describeSignature(matchedSig)}).`;
+
+        const rejected = await rejectReportAsDuplicate(rejectionMessage);
+        if (rejected) {
+            setStatus('✅ Report rejected automatically with duplicate explanation. Halted for review.', 'warning');
+        } else {
+            setStatus('⚠️ Could not complete automatic rejection — manual review required. Halted.', 'error');
+        }
         return false;
     } else {
         setStatus('✅ Duplicate Scan: No matching duplicate found in the report list.', 'success');
@@ -750,108 +1098,179 @@ async function validateCurrentReport() {
             steamingHoursInput.style.border = '1px solid green';
             setStatus(`✅ Steaming Hours Matrix: Value (${hours} hrs) within safe parameters [${steamLabel}] for ${earlyContext.reportType}.`, 'success');
         }
+
+        // [NEW v5.10] AT SEA (N/A) ELAPSED-TIME CROSS-CHECK
+        // Static bounds (16-26 hrs) only catch wildly wrong values. This
+        // check verifies the reported Steaming Hours actually matches the
+        // real elapsed time between this report and the nearest ALREADY
+        // CHECKED (green) report for the same vessel — calculated from true
+        // UTC instants, so a timezone change between reports (e.g. +07:00 ->
+        // +08:00) is correctly reflected as fewer/more elapsed hours, not
+        // assumed to be exactly 24.
+        if (earlyContext.reportType === 'At Sea NOON Report') {
+            const sidebarCardsForSteaming = getAllReportCards();
+            const currentCardForSteaming = identifyCurrentCard(sidebarCardsForSteaming);
+            const currentSigForSteaming = currentCardForSteaming ? extractCardSignature(currentCardForSteaming) : null;
+
+            if (!currentCardForSteaming || !currentSigForSteaming || isNaN(reportTimestamp(currentSigForSteaming))) {
+                setStatus('⚠️ Unable to determine this report\'s own timestamp — elapsed-time steaming hours check skipped.', 'warning');
+            } else {
+                const nearestChecked = findNearestCheckedCard(currentSigForSteaming, sidebarCardsForSteaming, currentCardForSteaming);
+
+                if (!nearestChecked) {
+                    setStatus('ℹ️ No already-checked report found for this vessel yet — elapsed-time steaming hours check skipped.', 'info');
+                } else if (isNaN(reportTimestamp(nearestChecked.sig))) {
+                    setStatus('⚠️ Nearest checked report has no usable timestamp — elapsed-time steaming hours check skipped.', 'warning');
+                } else {
+                    const currentTs = reportTimestamp(currentSigForSteaming);
+                    const checkedTs = reportTimestamp(nearestChecked.sig);
+                    const actualElapsedHours = Math.abs(currentTs - checkedTs) / (1000 * 60 * 60);
+                    const diff = Math.abs(actualElapsedHours - hours);
+
+                    const refLabel = `${nearestChecked.sig.date} ${nearestChecked.sig.time} ${nearestChecked.sig.utcOffset || '+00:00'}`;
+                    const currLabel = `${currentSigForSteaming.date} ${currentSigForSteaming.time} ${currentSigForSteaming.utcOffset || '+00:00'}`;
+
+                    if (diff > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
+                        errors.push(`Steaming hours (${hours}) does not match actual elapsed time (${actualElapsedHours.toFixed(2)} hrs) between this report (${currLabel}) and the nearest checked report (${refLabel}, ${nearestChecked.direction}).`);
+                        steamingHoursInput.style.cssText = 'border: 3px solid #f44336 !important; background-color: #ffebee !important;';
+                        isValid = false;
+                        setStatus(`❌ Steaming Hours Elapsed-Time Check: Reported ${hours} hrs ≠ actual elapsed ${actualElapsedHours.toFixed(2)} hrs vs ${nearestChecked.direction} checked report (${refLabel}).`, 'error');
+                    } else {
+                        steamingHoursInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
+                        setStatus(`✅ Steaming Hours Elapsed-Time Check: Reported ${hours} hrs matches actual elapsed ${actualElapsedHours.toFixed(2)} hrs vs ${nearestChecked.direction} checked report (${refLabel}).`, 'success');
+                    }
+                }
+            }
+        }
     } else {
         setStatus('ℹ️ Steaming Hours: Field unpopulated or not applicable to this report layout index.', 'info');
     }
 
-    // 4. BUNKER ROB & STICKY ADJ ZERO-VERIFICATION
+    // 4. ADJ CROSS-REPORT RECONCILIATION (BUNKER ROB GRID)  [FIX v5.9]
+    // ADJ is no longer rejected just for being non-zero. Instead, the ADJ
+    // figures on THIS report are validated against the adjacent reports for
+    // the same vessel:
+    //   - This report's "Last ROB" should continue from the previous
+    //     report's "ROB Start".
+    //   - This report's adjusted closing balance (ROB Start + ADJ) should
+    //     flow forward into the next report's "Last ROB".
+    // A future report is REQUIRED to perform this reconciliation. If none
+    // exists, validation halts WITHOUT approving or rejecting the report.
     setStatus('Targeting isolated Bunker ROB grid for values and ADJ fields...', 'info');
-    const bunkerRows = locateBunkerRows();
+    const currentBunkerCheck = scrapeBunkerSnapshot();
 
-    if (bunkerRows.length > 0) {
-        let validationFailTriggered = false;
+    if (currentBunkerCheck.length > 0) {
+        const sidebarCardsForAdj = getAllReportCards();
+        const currentCardForAdj = identifyCurrentCard(sidebarCardsForAdj);
+        const currentSigForAdj = currentCardForAdj ? extractCardSignature(currentCardForAdj) : null;
 
-        bunkerRows.forEach((row, index) => {
-            const cells = Array.from(row.querySelectorAll('td'));
-            let fuelTypeLabel = (cells[0] && cells[0].innerText.trim().split('\n')[0]) || `Line ${index + 1}`;
+        if (!currentCardForAdj || !currentSigForAdj || isNaN(reportTimestamp(currentSigForAdj))) {
+            setStatus('⚠️ Unable to determine this report\'s position in the vessel timeline — ADJ cross-report validation skipped.', 'warning');
+        } else {
+            const { previousCard, futureCard } = findAdjacentVesselReports(currentSigForAdj, sidebarCardsForAdj, currentCardForAdj);
 
-            let lastRobInput = null;
-            let robStartInput = null;
-            let adjInput = null;
-            let adjStaticVal = 0;
-            let hasAdjColumn = false;
-            let adjElementToHighlight = null;
+            // [REQUIRED] Without a future report, ADJ values for this report
+            // cannot be reconciled. Stop here — do not approve, do not reject.
+            if (!futureCard) {
+                setStatus('🛑 No future report is available for validation. Reporting appears to be complete for this vessel.', 'warning');
+                setStatus('⏸️ ADJ validation could not be completed for this reason — halting without approving the report.', 'warning');
+                return false;
+            }
 
-            cells.forEach(cell => {
-                const titleEl = cell.querySelector('.p-column-title');
-                const titleText = titleEl ? titleEl.innerText.toLowerCase().trim() : '';
-                const input = cell.querySelector('input');
-                
-                const inputId = input ? (input.id || '').toLowerCase() : '';
-                const inputName = input ? (input.name || '').toLowerCase() : '';
+            // Pull the next chronological report's opening Bunker ROB figures.
+            setStatus('Cross-referencing ADJ figures against the next report in the timeline...', 'info');
+            futureCard.click();
+            await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+            await waitForDOMStable();
+            const futureBunkerSnapshot = scrapeBunkerSnapshot();
 
-                if (titleText.includes('last rob') || titleText.includes('previous') || inputId.includes('lastrob') || inputName.includes('last_rob')) {
-                    if (input) lastRobInput = input;
-                } else if (titleText.includes('rob start') || titleText.includes('start') || inputId.includes('robstart') || inputName.includes('rob_start')) {
-                    if (input) robStartInput = input;
-                } 
-                else if (titleText.includes('adj') || titleText.includes('adjustment') || inputId.includes('adj') || inputName.includes('adjustment')) {
-                    hasAdjColumn = true;
-                    if (input) {
-                        adjInput = input;
-                        adjElementToHighlight = input;
-                    } else {
-                        const cellCleanText = cell.innerText.replace(titleEl ? titleEl.innerText : '', '').trim();
-                        adjStaticVal = parseFloat(cellCleanText.replace(/,/g, '')) || 0;
-                        adjElementToHighlight = cell;
+            // Optionally pull the previous chronological report's figures too.
+            let previousBunkerSnapshot = [];
+            if (previousCard) {
+                setStatus('Cross-referencing ADJ figures against the preceding report in the timeline...', 'info');
+                previousCard.click();
+                await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+                await waitForDOMStable();
+                previousBunkerSnapshot = scrapeBunkerSnapshot();
+            }
+
+            // Return to the current report before continuing.
+            currentCardForAdj.click();
+            await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+            await waitForDOMStable();
+
+            // Re-scrape: earlier element references are stale after the
+            // form was re-rendered while navigating away and back.
+            const freshCurrentSnapshot = scrapeBunkerSnapshot();
+
+            let validationFailTriggered = false;
+
+            freshCurrentSnapshot.forEach(curr => {
+                // Match by normalised label first; fall back to row position
+                // if no label match is found (handles cosmetic render diffs
+                // the normaliser didn't catch). This prevents a join miss
+                // from silently skipping the ADJ check.
+                const future = futureBunkerSnapshot.find(f => f.fuelTypeLabel === curr.fuelTypeLabel)
+                            || futureBunkerSnapshot[curr.rowIndex];
+                const prev = previousBunkerSnapshot.find(p => p.fuelTypeLabel === curr.fuelTypeLabel)
+                            || previousBunkerSnapshot[curr.rowIndex];
+
+                // Check A — Opening balance continuity: this report's "Last ROB"
+                // should pick up from the previous report's "ROB Start".
+                if (prev && prev.robStart !== null && curr.lastRob !== null) {
+                    if (Math.abs(curr.lastRob - prev.robStart) > CONFIG.ADJ_TOLERANCE) {
+                        errors.push(`[${curr.displayLabel}] Last ROB (${curr.lastRob}) does not continue from the previous report's ROB Start (${prev.robStart}).`);
+                        if (curr.lastRobInput) {
+                            curr.lastRobInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                        }
+                        isValid = false;
+                        validationFailTriggered = true;
+                        setStatus(`❌ ROB Continuity [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ previous report's ROB Start (${prev.robStart}).`, 'error');
+                    } else if (curr.lastRobInput) {
+                        curr.lastRobInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
                     }
+                }
+
+                // Check B — ADJ reconciliation: this report's adjusted closing
+                // balance (ROB Start + ADJ) should flow into the next report's
+                // "Last ROB". This is the real test of whether the ADJ value
+                // entered on this report is correct.
+                if (future && future.lastRob !== null && curr.robStart !== null) {
+                    const expectedFutureLastRob = curr.robStart + curr.adj;
+                    if (Math.abs(future.lastRob - expectedFutureLastRob) > CONFIG.ADJ_TOLERANCE) {
+                        errors.push(`[${curr.displayLabel}] ADJ value (${curr.adj}) does not reconcile — ROB Start + ADJ (${expectedFutureLastRob}) does not match the next report's Last ROB (${future.lastRob}).`);
+                        if (curr.adjElementToHighlight) {
+                            curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                        }
+                        isValid = false;
+                        validationFailTriggered = true;
+                        setStatus(`❌ ADJ Reconciliation [${curr.displayLabel}]: ROB Start + ADJ (${expectedFutureLastRob}) ≠ next report's Last ROB (${future.lastRob}).`, 'error');
+                    } else if (curr.adjElementToHighlight) {
+                        curr.adjElementToHighlight.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
+                    }
+                } else if (curr.adj !== 0) {
+                    // ADJ is non-zero but there's no usable future row to check
+                    // it against (missing match, or future row has no Last ROB
+                    // value entered). A non-zero ADJ can NEVER be silently
+                    // waved through — treat this as a validation failure
+                    // rather than skipping the check.
+                    errors.push(`[${curr.displayLabel}] ADJ is non-zero (${curr.adj}) but could not be reconciled against the next report — no matching fuel-type row or Last ROB value was found there.`);
+                    if (curr.adjElementToHighlight) {
+                        curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                    }
+                    isValid = false;
+                    validationFailTriggered = true;
+                    setStatus(`❌ ADJ Reconciliation [${curr.displayLabel}]: ADJ is non-zero (${curr.adj}) and could not be verified against the next report. Treating as failed.`, 'error');
+                }
+
+                if (curr.robStartInput && !validationFailTriggered) {
+                    curr.robStartInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
                 }
             });
 
-            if (!lastRobInput || !robStartInput) {
-                const rowInputs = cells.map(c => c.querySelector('input')).filter(inp => inp && inp.type !== 'hidden' && !inp.disabled);
-                if (rowInputs.length >= 2) {
-                    lastRobInput = rowInputs[0];
-                    robStartInput = rowInputs[1];
-                }
+            if (!validationFailTriggered) {
+                setStatus('✅ Bunker ROB Grid: ADJ values reconcile correctly against the previous and next reports.', 'success');
             }
-
-            // CRITICAL ADJ STRICT ENFORCEMENT
-            let finalAdjValue = 0;
-            if (adjInput) {
-                finalAdjValue = parseFloat(adjInput.value.replace(/,/g, '').trim()) || 0;
-            } else if (hasAdjColumn) {
-                finalAdjValue = adjStaticVal;
-            }
-
-            if (finalAdjValue !== 0) {
-                errors.push(`[${fuelTypeLabel}] ADJ value must be exactly 0 (Current: ${finalAdjValue})`);
-                if (adjElementToHighlight) {
-                    adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                }
-                isValid = false;
-                validationFailTriggered = true;
-                setStatus(`❌ ADJ Error [${fuelTypeLabel}]: Field is non-zero (${finalAdjValue}). Report Rejected.`, 'error');
-            } else if (adjInput) {
-                adjInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-            }
-
-            // Validate implicit layout consistency
-            if (lastRobInput && robStartInput) {
-                const lastRobVal  = parseFloat(lastRobInput.value.replace(/,/g, '').trim());
-                const robStartVal = parseFloat(robStartInput.value.replace(/,/g, '').trim());
-
-                const safeLast  = isNaN(lastRobVal)  ? 0 : lastRobVal;
-                const safeStart = isNaN(robStartVal) ? 0 : robStartVal;
-
-                if (lastRobInput.value.trim() !== '' || robStartInput.value.trim() !== '') {
-                    if (Math.abs(safeLast - safeStart) > CONFIG.ADJ_TOLERANCE) {
-                        errors.push(`[${fuelTypeLabel}] Mismatch: Last (${safeLast}) != Start (${safeStart})`);
-                        lastRobInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                        robStartInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                        isValid = false;
-                        validationFailTriggered = true;
-                        setStatus(`❌ ROB Mismatch [${fuelTypeLabel}]: Last (${safeLast}) ≠ Start (${safeStart})`, 'error');
-                    } else {
-                        lastRobInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                        robStartInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                    }
-                }
-            }
-        });
-
-        if (!validationFailTriggered) {
-            setStatus('✅ Bunker ROB Grid: Confirmed perfect data alignment inside the Bunker ROB grid (all ADJ values are exactly 0).', 'success');
         }
     }
 
@@ -981,6 +1400,96 @@ async function approveReport() {
     setStatus('✅ Report successfully validated, signed off, and approved in system.', 'success');
     await sleep(CONFIG.DOM_STABLE_HEADSTART_MS);
     await waitForDOMStable();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+//   REPORT REJECTION (DUPLICATE HANDLING)  [NEW v5.8-D]
+// ---------------------------------------------------------------------------
+// On a confirmed duplicate, click "Reject", then fill the rejection-reason
+// field INSIDE the resulting confirmation dialog ONLY — this never touches
+// the report form's own "Remarks" field. Finally, confirm the rejection.
+// ---------------------------------------------------------------------------
+
+async function rejectReportAsDuplicate(rejectionMessage) {
+    setStatus('Locating Reject control...', 'info');
+
+    let rejectBtn = queryAllContexts(
+        'button[label="Reject"], [appconfirmation][label="Reject"], .p-button[label="Reject"]'
+    )[0];
+
+    if (!rejectBtn) {
+        rejectBtn = queryAllContexts('button, .p-button, [role="button"]').find(el => {
+            const label = (el.getAttribute('label') || '').toLowerCase();
+            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
+            return label === 'reject' || label.includes('reject') || text === 'reject';
+        });
+    }
+
+    if (!rejectBtn) {
+        setStatus('❌ Reject control not found on screen — cannot auto-reject duplicate.', 'error');
+        return false;
+    }
+
+    rejectBtn.click();
+    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+
+    // Scope the reason/comment field lookup to an OPEN DIALOG ONLY.
+    // This deliberately does NOT fall back to a document-wide search, so the
+    // report form's own "Remarks" field can never be matched/modified.
+    const dialog = findOpenDialog();
+
+    if (dialog) {
+        const commentField = Array.from(dialog.querySelectorAll('textarea, input[type="text"]')).find(el => {
+            const id = (el.id || '').toLowerCase();
+            const name = (el.name || '').toLowerCase();
+            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+            return id.includes('comment') || id.includes('remark') || id.includes('reason') ||
+                   name.includes('comment') || name.includes('remark') || name.includes('reason') ||
+                   ph.includes('comment') || ph.includes('remark') || ph.includes('reason');
+        });
+
+        if (commentField) {
+            commentField.value = rejectionMessage;
+            commentField.dispatchEvent(new Event('input', { bubbles: true }));
+            commentField.dispatchEvent(new Event('change', { bubbles: true }));
+            setStatus(`📝 Rejection reason entered in confirmation dialog: "${rejectionMessage}"`, 'warning');
+        } else {
+            setStatus('⚠️ No reason/comment field found inside the Reject confirmation dialog — proceeding without one.', 'warning');
+        }
+    } else {
+        setStatus('⚠️ No confirmation dialog detected after clicking Reject — proceeding without a reason field. (Remarks field intentionally left untouched.)', 'warning');
+    }
+
+    // Locate confirmation button — prefer one scoped to the dialog, fall back
+    // to the standard PrimeFaces confirm-accept selector.
+    let confirmBtn = null;
+    if (dialog) {
+        confirmBtn = Array.from(dialog.querySelectorAll('button, .p-button, [role="button"]')).find(el => {
+            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const label = (el.getAttribute('label') || '').toLowerCase();
+            return (
+                text === 'yes' || label === 'yes' ||
+                text === 'confirm' || text === 'ok' ||
+                text === 'reject' || label === 'reject' ||
+                text === 'submit'
+            );
+        });
+    }
+    if (!confirmBtn) {
+        confirmBtn = queryAllContexts('.p-confirm-dialog-accept, button[label="Yes"]')[0];
+    }
+
+    if (!confirmBtn) {
+        setStatus('❌ Rejection confirmation button not found. Reject dialog may require manual completion.', 'error');
+        return false;
+    }
+
+    confirmBtn.click();
+    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+    await waitForDOMStable();
+
+    setStatus('✅ Report rejected due to duplicate detection.', 'warning');
     return true;
 }
 
