@@ -1,3 +1,6 @@
+main.ceb02529d6f9d34a.js:1 Filtered fuel: []
+main.ceb02529d6f9d34a.js:1 Fuel Type Values: []
+main.ceb02529d6f9d34a.js:1 No fuel types found or fuelTypeValues is empty.
 // =========================================================================
 //   MARITIME REPORT AUTOPILOT — v6.0.0 (ROB Integrity & ADJ Enforcement)
 //   Fixes & Upgrades applied:
@@ -769,35 +772,43 @@ function validatePortEvents() {
 // ---------------------------------------------------------------------------
 
 function locateTrueBunkerContainer() {
+    // [FIX v6.0.0-C] Match "BUNKERS ROB", "BUNKER ROB", "BUNKER R.O.B" etc.
+    // The old code did an exact === 'BUNKER ROB' check which failed whenever
+    // the app rendered the legend as "BUNKERS ROB" (plural).
+    function isBunkerRobHeader(text) {
+        const t = text.trim().toUpperCase().replace(/[.\s]+/g, ' ');
+        return (t.includes('BUNKER') && t.includes('ROB')) || t === 'BUNKER';
+    }
+
     for (const ctx of getAllContexts()) {
         if (!ctx) continue;
         const fieldsets = ctx.querySelectorAll('fieldset');
         for (const fs of fieldsets) {
             const legend = fs.querySelector('legend');
-            if (legend) {
-                const legendText = legend.innerText.trim().toUpperCase();
-                if (legendText === 'BUNKER ROB') return fs;
-            }
+            if (legend && isBunkerRobHeader(legend.innerText)) return fs;
         }
     }
 
     const badges = queryAllContexts(
-        '.p-panel-header, .p-component-header, legend, .bunker-header'
+        '.p-panel-header, .p-component-header, legend, .bunker-header, ' +
+        '[class*="panel-header"], [class*="section-header"], [class*="card-header"]'
     );
     for (const badge of badges) {
-        const text = (badge.innerText || '').toUpperCase();
-        if (text === 'BUNKER ROB' || text === 'BUNKER') {
-            let current = badge.parentElement;
-            while (current && current !== current.ownerDocument.body) {
-                if (
-                    current.tagName === 'FIELDSET' ||
-                    current.classList.contains('p-component') ||
-                    current.classList.contains('card')
-                ) {
-                    return current;
-                }
-                current = current.parentElement;
+        const text = (badge.innerText || badge.textContent || '');
+        if (!isBunkerRobHeader(text)) continue;
+        let current = badge.parentElement;
+        while (current && current !== current.ownerDocument.body) {
+            if (
+                current.tagName === 'FIELDSET' ||
+                current.classList.contains('p-component') ||
+                current.classList.contains('card') ||
+                current.tagName === 'TABLE' ||
+                current.tagName === 'SECTION' ||
+                current.tagName === 'DIV'
+            ) {
+                return current;
             }
+            current = current.parentElement;
         }
     }
     return null;
@@ -812,6 +823,16 @@ function locateBunkerRows() {
     );
     if (rows.length === 0) rows = Array.from(bunkerContainer.querySelectorAll('tr'));
 
+    // [FIX v6.0.0-C] Also catch rows identified by data-td-name attributes.
+    // This app renders <tr id="atseabunkerrobdetails..."> with <td data-td-name="...">
+    // children. If the standard row selectors missed them, grab any <tr> that
+    // contains at least one <td data-td-name> cell.
+    if (rows.length === 0) {
+        rows = Array.from(bunkerContainer.querySelectorAll('tr')).filter(tr =>
+            tr.querySelector('td[data-td-name]')
+        );
+    }
+
     return rows.filter(row => {
         if (
             row.closest('thead') ||
@@ -825,7 +846,10 @@ function locateBunkerRows() {
             const style = window.getComputedStyle(inp);
             return style.display !== 'none' && style.visibility !== 'hidden';
         });
-        return inputs.length >= 2;
+        // Accept rows that have at least 1 visible input OR at least 2 data-td-name cells
+        // (some columns like ADJ may be read-only text, not inputs).
+        const dataCells = Array.from(row.querySelectorAll('td[data-td-name]'));
+        return inputs.length >= 1 || dataCells.length >= 2;
     });
 }
 
@@ -978,75 +1002,168 @@ function findNearestCheckedCard(currentSig, sidebarCards, currentCard) {
 
 
 // one entry per fuel-type row with { fuelTypeLabel, lastRob, robStart, adj }
-// plus references to the live input/cell elements (for highlighting) when
-// the snapshot is taken for the report currently on screen.
+// plus references to the live input/cell elements (for highlighting).
+//
+// [FIX v6.0.0] HEADER-SCAN COLUMN DETECTION:
+// The old approach relied on .p-column-title elements being present in every
+// data cell. When those are absent (mobile renders, collapsed tables, or plain
+// <td> layouts), ALL title lookups returned '' and the positional fallback
+// blindly assigned rowInputs[0]=lastRob / rowInputs[1]=robStart, which is
+// wrong whenever the column order differs or there's a label cell before the
+// inputs. The new approach:
+//   1. PRIMARY — scan the table's <thead> (or first <tr> of <th> cells) once
+//      to build a column-index map: { lastRobCol, robStartCol, adjCol }.
+//   2. SECONDARY — scan every data cell's own text/title/input id+name (as
+//      before) to catch inline-label tables that have no separate header row.
+//   3. FALLBACK — if neither method resolves both columns, use input position
+//      within the row (0=lastRob, 1=robStart, 2=adj), same as before.
 function scrapeBunkerSnapshot() {
+    const bunkerContainer = locateTrueBunkerContainer();
     const bunkerRows = locateBunkerRows();
     const snapshot = [];
 
+    // --- PASS 1: build a header-based column-index map ---
+    // Keywords tested against the full normalised header cell text.
+    const LAST_ROB_KEYS  = ['last rob', 'prev rob', 'previous rob', 'rob (previous)', 'rob prev'];
+    const ROB_START_KEYS = ['rob start', 'start rob', 'opening rob', 'rob (start)', 'rob(start)'];
+    const ADJ_KEYS       = ['adj', 'adjustment'];
+
+    let lastRobCol  = -1;
+    let robStartCol = -1;
+    let adjCol      = -1;
+
+    if (bunkerContainer) {
+        // Look for <th> cells in the container — they may be in a <thead> or
+        // in the first <tr> that only contains <th> elements.
+        const thCells = Array.from(bunkerContainer.querySelectorAll('th'));
+        if (thCells.length >= 2) {
+            thCells.forEach((th, colIdx) => {
+                const txt = (th.innerText || '').toLowerCase().replace(/\s+/g, ' ').trim();
+                if (lastRobCol  < 0 && LAST_ROB_KEYS.some(k  => txt.includes(k)))  lastRobCol  = colIdx;
+                if (robStartCol < 0 && ROB_START_KEYS.some(k => txt.includes(k))) robStartCol = colIdx;
+                if (adjCol      < 0 && ADJ_KEYS.some(k      => txt.includes(k)))      adjCol  = colIdx;
+            });
+        }
+    }
+
+    // Helper: extract a numeric value from an element (input or cell text).
+    function numVal(el) {
+        if (!el) return null;
+        const raw = el.tagName === 'INPUT' ? el.value : el.innerText;
+        const cleaned = (raw || '').replace(/,/g, '').trim();
+        if (cleaned === '' || cleaned === '-' || cleaned === 'N/A') return null;
+        const n = parseFloat(cleaned);
+        return isNaN(n) ? null : n;
+    }
+
     bunkerRows.forEach((row, index) => {
         const cells = Array.from(row.querySelectorAll('td'));
-        const rawLabel = (cells[0] && cells[0].innerText.trim().split('\n')[0]) || '';
-        // Normalised join key: strips footnote markers/asterisks, collapses
-        // whitespace, uppercases — so cosmetic render differences between
-        // the current/previous/future page loads don't break row matching.
+        if (cells.length === 0) return;
+
+        // Label is always the first cell's text (strip footnote markers).
+        const rawLabel = (cells[0].innerText || '').trim().split('\n')[0];
         const normalisedLabel = rawLabel.replace(/[*†‡\d]+$/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
         const fuelTypeLabel = normalisedLabel || `__ROW_${index}`;
-        const displayLabel = rawLabel || `Line ${index + 1}`;
+        const displayLabel  = rawLabel || `Line ${index + 1}`;
 
-        let lastRobInput = null;
+        // Collect all visible inputs in this row for positional fallback.
+        const allInputs = cells.flatMap(c =>
+            Array.from(c.querySelectorAll('input')).filter(inp => {
+                if (inp.type === 'hidden' || inp.disabled) return false;
+                const s = window.getComputedStyle(inp);
+                return s.display !== 'none' && s.visibility !== 'hidden';
+            })
+        );
+
+        let lastRobInput  = null;
         let robStartInput = null;
-        let adjInput = null;
-        let adjStaticVal = 0;
-        let hasAdjColumn = false;
+        let adjInput      = null;
+        let adjStaticVal  = 0;
+        let hasAdjColumn  = false;
         let adjElementToHighlight = null;
 
+        // --- PASS 2a: data-td-name attributes (highest priority — seen in this app's DOM) ---
+        // The app renders <td data-td-name="lastRemaining">, <td data-td-name="robstart">,
+        // <td data-td-name="adj"> etc. This is the most reliable signal when present.
         cells.forEach(cell => {
-            const titleEl = cell.querySelector('.p-column-title');
-            const titleText = titleEl ? titleEl.innerText.toLowerCase().trim() : '';
-            const input = cell.querySelector('input');
+            const tdName = (cell.getAttribute('data-td-name') || '').toLowerCase().replace(/[_\-\s]/g, '');
+            const inp    = cell.querySelector('input');
 
-            const inputId = input ? (input.id || '').toLowerCase() : '';
-            const inputName = input ? (input.name || '').toLowerCase() : '';
+            const isLastRobByAttr  = ['lastremaining', 'lastrob', 'previousrob', 'prevrob'].includes(tdName);
+            const isRobStartByAttr = ['robstart', 'startingrob', 'openrob', 'robopeningbalance'].includes(tdName);
+            const isAdjByAttr      = ['adj', 'adjustment'].includes(tdName);
 
-            if (titleText.includes('last rob') || titleText.includes('previous') || inputId.includes('lastrob') || inputName.includes('last_rob')) {
-                if (input) lastRobInput = input;
-            } else if (titleText.includes('rob start') || titleText.includes('start') || inputId.includes('robstart') || inputName.includes('rob_start')) {
-                if (input) robStartInput = input;
-            } else if (titleText.includes('adj') || titleText.includes('adjustment') || inputId.includes('adj') || inputName.includes('adjustment')) {
+            if (!lastRobInput  && isLastRobByAttr  && inp) lastRobInput  = inp;
+            if (!robStartInput && isRobStartByAttr && inp) robStartInput = inp;
+            if (!hasAdjColumn  && isAdjByAttr) {
                 hasAdjColumn = true;
-                if (input) {
-                    adjInput = input;
-                    adjElementToHighlight = input;
-                } else {
-                    const cellCleanText = cell.innerText.replace(titleEl ? titleEl.innerText : '', '').trim();
-                    adjStaticVal = parseFloat(cellCleanText.replace(/,/g, '')) || 0;
-                    adjElementToHighlight = cell;
-                }
+                if (inp) { adjInput = inp; adjElementToHighlight = inp; }
+                else { adjStaticVal = numVal(cell) || 0; adjElementToHighlight = cell; }
             }
         });
 
-        if (!lastRobInput || !robStartInput) {
-            const rowInputs = cells.map(c => c.querySelector('input')).filter(inp => inp && inp.type !== 'hidden' && !inp.disabled);
-            if (rowInputs.length >= 2) {
-                lastRobInput = lastRobInput || rowInputs[0];
-                robStartInput = robStartInput || rowInputs[1];
+        // --- PASS 2b: header-index map (when <th> headers exist and pass 2a didn't find everything) ---
+        if (!lastRobInput  && lastRobCol  >= 0 && cells[lastRobCol])  lastRobInput  = cells[lastRobCol].querySelector('input')  || null;
+        if (!robStartInput && robStartCol >= 0 && cells[robStartCol]) robStartInput = cells[robStartCol].querySelector('input') || null;
+        if (!hasAdjColumn  && adjCol >= 0 && cells[adjCol]) {
+            hasAdjColumn = true;
+            const adjCell = cells[adjCol];
+            const adjInp  = adjCell.querySelector('input');
+            if (adjInp) {
+                adjInput = adjInp;
+                adjElementToHighlight = adjInp;
+            } else {
+                adjStaticVal = numVal(adjCell) || 0;
+                adjElementToHighlight = adjCell;
             }
         }
 
+        // --- PASS 2c: per-cell text / id / name scan (inline-label tables) ---
+        if (!lastRobInput || !robStartInput) {
+            cells.forEach(cell => {
+                const titleEl  = cell.querySelector('.p-column-title');
+                const cellTxt  = (titleEl ? titleEl.innerText : cell.getAttribute('data-label') || '').toLowerCase().trim();
+                const inp      = cell.querySelector('input');
+                const inpId    = inp ? (inp.id   || '').toLowerCase() : '';
+                const inpName  = inp ? (inp.name || '').toLowerCase() : '';
+
+                const isLastRob  = LAST_ROB_KEYS.some(k  => cellTxt.includes(k) || inpId.includes(k.replace(/ /g,'')) || inpName.includes(k.replace(/ /g,'')))
+                                || inpId.includes('lastrob') || inpName.includes('last_rob');
+                const isRobStart = ROB_START_KEYS.some(k => cellTxt.includes(k) || inpId.includes(k.replace(/ /g,'')) || inpName.includes(k.replace(/ /g,'')))
+                                || inpId.includes('robstart') || inpName.includes('rob_start');
+                const isAdj      = ADJ_KEYS.some(k => cellTxt.includes(k) || inpId.includes(k) || inpName.includes(k));
+
+                if (!lastRobInput  && isLastRob  && inp) lastRobInput  = inp;
+                if (!robStartInput && isRobStart && inp) robStartInput = inp;
+                if (!hasAdjColumn  && isAdj) {
+                    hasAdjColumn = true;
+                    if (inp) { adjInput = inp; adjElementToHighlight = inp; }
+                    else { adjStaticVal = numVal(cell) || 0; adjElementToHighlight = cell; }
+                }
+            });
+        }
+
+        // --- PASS 2d: positional fallback (3-input row → [0]=lastRob, [1]=robStart, [2]=adj) ---
+        if ((!lastRobInput || !robStartInput) && allInputs.length >= 2) {
+            if (!lastRobInput)  lastRobInput  = allInputs[0];
+            if (!robStartInput) robStartInput = allInputs[1];
+            if (!hasAdjColumn && allInputs[2]) {
+                hasAdjColumn = true;
+                adjInput = allInputs[2];
+                adjElementToHighlight = allInputs[2];
+            }
+        }
+
+        // Final ADJ value.
         let finalAdjValue = 0;
         if (adjInput) {
-            finalAdjValue = parseFloat(adjInput.value.replace(/,/g, '').trim()) || 0;
+            finalAdjValue = parseFloat((adjInput.value || '').replace(/,/g, '').trim()) || 0;
         } else if (hasAdjColumn) {
             finalAdjValue = adjStaticVal;
         }
 
-        const lastRobVal = (lastRobInput && lastRobInput.value.trim() !== '')
-            ? (parseFloat(lastRobInput.value.replace(/,/g, '').trim()) || 0)
-            : null;
-        const robStartVal = (robStartInput && robStartInput.value.trim() !== '')
-            ? (parseFloat(robStartInput.value.replace(/,/g, '').trim()) || 0)
-            : null;
+        const lastRobVal  = numVal(lastRobInput);
+        const robStartVal = numVal(robStartInput);
 
         snapshot.push({
             fuelTypeLabel,
@@ -1057,9 +1174,9 @@ function scrapeBunkerSnapshot() {
             adjInput,
             adjElementToHighlight,
             hasAdjColumn,
-            lastRob: lastRobVal,
+            lastRob:  lastRobVal,
             robStart: robStartVal,
-            adj: finalAdjValue
+            adj:      finalAdjValue
         });
     });
 
@@ -1235,6 +1352,25 @@ async function validateCurrentReport() {
     setStatus('Targeting isolated Bunker ROB grid for values and ADJ fields...', 'info');
     const currentBunkerCheck = scrapeBunkerSnapshot();
 
+    // --- DIAGNOSTIC DUMP: always show what was scraped so failures are visible ---
+    if (currentBunkerCheck.length === 0) {
+        setStatus('🔍 DEBUG Bunker Scrape: 0 rows found — locateBunkerRows() returned empty.', 'warning');
+    } else {
+        currentBunkerCheck.forEach((r, i) => {
+            setStatus(`🔍 DEBUG Row[${i}] "${r.displayLabel}": lastRob=${r.lastRob === null ? 'NULL (not scraped)' : r.lastRob}  robStart=${r.robStart === null ? 'NULL (not scraped)' : r.robStart}  adj=${r.adj}  lastRobInput=${r.lastRobInput ? 'FOUND' : 'MISSING'}  robStartInput=${r.robStartInput ? 'FOUND' : 'MISSING'}`, 'info');
+        });
+    }
+
+    // HARD BLOCK: if bunker data required but container not found, do not approve.
+    if (currentBunkerCheck.length === 0) {
+        if (CONFIG.REQUIRE_BUNKER_DATA) {
+            setStatus('🛑 LOCKOUT: Bunker ROB grid not found on this report page. REQUIRE_BUNKER_DATA = true — cannot approve without verifying ROB values.', 'error');
+            isValid = false;
+        } else {
+            setStatus('ℹ️ Bunker ROB section absent — REQUIRE_BUNKER_DATA is false, skipping.', 'info');
+        }
+    }
+
     if (currentBunkerCheck.length > 0) {
 
         // ===================================================================
@@ -1249,7 +1385,16 @@ async function validateCurrentReport() {
         setStatus('Verifying within-report ROB integrity (Last ROB + ADJ = ROB Start)...', 'info');
 
         currentBunkerCheck.forEach(curr => {
-            if (curr.lastRob === null || curr.robStart === null) return; // row not fully populated
+            // HARD FAIL if scraping didn't resolve both columns — silently
+            // skipping these rows was the root cause of approvals going through.
+            if (curr.lastRob === null || curr.robStart === null) {
+                const nullMsg = `[${curr.displayLabel}] Could not extract Last ROB${curr.lastRob === null ? ' (NULL)' : ''} or ROB Start${curr.robStart === null ? ' (NULL)' : ''} — column detection failed. Cannot validate ROB continuity for this row.`;
+                errors.push(nullMsg);
+                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Last ROB=${curr.lastRob} ROB Start=${curr.robStart} — unable to verify. Blocking approval.`, 'error');
+                isValid = false;
+                withinReportFailed = true;
+                return;
+            }
 
             const computedRobStart = Math.round((curr.lastRob + curr.adj) * 1000) / 1000;
             const mismatch = Math.abs(computedRobStart - curr.robStart) > CONFIG.ADJ_TOLERANCE;
@@ -2104,3 +2249,4 @@ class GeoformsTimelineValidator {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = GeoformsTimelineValidator;
 }
+undefined
