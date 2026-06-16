@@ -1,6 +1,4 @@
-main.ceb02529d6f9d34a.js:1 Filtered fuel: []
-main.ceb02529d6f9d34a.js:1 Fuel Type Values: []
-main.ceb02529d6f9d34a.js:1 No fuel types found or fuelTypeValues is empty.
+
 // =========================================================================
 //   MARITIME REPORT AUTOPILOT — v6.0.0 (ROB Integrity & ADJ Enforcement)
 //   Fixes & Upgrades applied:
