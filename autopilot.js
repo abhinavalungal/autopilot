@@ -1,5 +1,5 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v5.9 (ADJ Cross-Report Reconciliation)
+//   MARITIME REPORT AUTOPILOT — v6.0.0 (ROB Integrity & ADJ Enforcement)
 //   Fixes & Upgrades applied:
 //     [FIX-1 to 7] Maintained core timeline engine stability fixes.
 //     [FIX-8] Connected bridge between DOM scrapers and compliance matrix.
@@ -59,6 +59,22 @@
 //             the log now prints the full signature of BOTH the current report
 //             and the matched existing report (type, vessel, route/voyage, date,
 //             time) for fast troubleshooting.
+//     [FIX - v6.0.0-A] WITHIN-REPORT ROB INTEGRITY (NEW CHECK — was completely
+//             absent in all prior versions): For every fuel-type row, Last ROB +
+//             ADJ MUST equal ROB Start on the SAME report. When ADJ = 0 this
+//             simplifies to Last ROB = ROB Start. This check now runs immediately
+//             on the freshly-scraped current report data, before any cross-report
+//             navigation, and independently of whether adjacent sidebar cards can
+//             be identified. A mismatch sets isValid = false and halts approval.
+//             This was the root cause of the "ADJ = 0 validation not working"
+//             symptom: without this within-report gate, a report whose Last ROB
+//             differed from its ROB Start by any amount was approved silently.
+//     [FIX - v6.0.0-B] VALIDATION GUARD TIGHTENED: The within-report ROB check
+//             (above) now also runs on currentBunkerCheck BEFORE the cross-report
+//             navigation block, so it can never be bypassed by a failed
+//             identifyCurrentCard() call. Previously, if the sidebar card
+//             detection returned null, the entire bunker validation section was
+//             skipped wholesale and approval proceeded unchecked.
 //     [FIX - v5.9] ADJ VALIDATION OVERHAUL: The previous "ADJ must be exactly 0"
 //             rule rejected any non-zero ADJ outright WITHOUT checking it against
 //             anything, and a separate same-report Last-ROB-vs-ROB-Start check
@@ -1076,7 +1092,7 @@ function findOpenDialog() {
 
 async function validateCurrentReport() {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v5.8)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v6.0.0)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     let isValid = true;
@@ -1220,6 +1236,60 @@ async function validateCurrentReport() {
     const currentBunkerCheck = scrapeBunkerSnapshot();
 
     if (currentBunkerCheck.length > 0) {
+
+        // ===================================================================
+        // [FIX v6.0.0-A/B] WITHIN-REPORT ROB INTEGRITY CHECK
+        // This check runs IMMEDIATELY on the freshly-scraped current snapshot,
+        // before any sidebar-card detection or cross-report navigation.
+        // It can therefore NEVER be skipped by a failed card-identification
+        // step. Rule: Last ROB + ADJ must equal ROB Start on THIS report.
+        // When ADJ = 0 this reduces to: Last ROB must equal ROB Start.
+        // ===================================================================
+        let withinReportFailed = false;
+        setStatus('Verifying within-report ROB integrity (Last ROB + ADJ = ROB Start)...', 'info');
+
+        currentBunkerCheck.forEach(curr => {
+            if (curr.lastRob === null || curr.robStart === null) return; // row not fully populated
+
+            const computedRobStart = Math.round((curr.lastRob + curr.adj) * 1000) / 1000;
+            const mismatch = Math.abs(computedRobStart - curr.robStart) > CONFIG.ADJ_TOLERANCE;
+
+            if (mismatch) {
+                const errMsg = curr.adj === 0
+                    ? `[${curr.displayLabel}] ADJ = 0 but Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}). Values must be identical when no adjustment is applied.`
+                    : `[${curr.displayLabel}] Last ROB (${curr.lastRob}) + ADJ (${curr.adj}) = ${computedRobStart} but ROB Start is (${curr.robStart}). Difference exceeds tolerance.`;
+                errors.push(errMsg);
+
+                if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                if (curr.robStartInput) curr.robStartInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                if (curr.adj !== 0 && curr.adjElementToHighlight) {
+                    curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                }
+
+                const statusMsg = curr.adj === 0
+                    ? `❌ ROB Mismatch [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}) — ADJ = 0 so values must match exactly.`
+                    : `❌ ROB Mismatch [${curr.displayLabel}]: Last ROB ${curr.lastRob} + ADJ ${curr.adj} = ${computedRobStart} ≠ ROB Start ${curr.robStart}.`;
+                setStatus(statusMsg, 'error');
+
+                isValid = false;
+                withinReportFailed = true;
+            } else {
+                if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
+                if (curr.robStartInput) curr.robStartInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
+
+                const okMsg = curr.adj === 0
+                    ? `✅ ROB Match [${curr.displayLabel}]: Last ROB = ROB Start = ${curr.lastRob} (ADJ = 0 — exact match confirmed).`
+                    : `✅ ROB Match [${curr.displayLabel}]: Last ROB ${curr.lastRob} + ADJ ${curr.adj} = ${computedRobStart} = ROB Start ${curr.robStart} ✓`;
+                setStatus(okMsg, 'success');
+            }
+        });
+
+        if (withinReportFailed) {
+            setStatus('🛑 Within-Report ROB Integrity FAILED — halting. Cross-report ADJ check skipped until ROB values are corrected.', 'error');
+        } else {
+            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB + ADJ = ROB Start).', 'success');
+
+        // === CROSS-REPORT ADJ RECONCILIATION (only reached when within-report check passes) ===
         const sidebarCardsForAdj = getAllReportCards();
         const currentCardForAdj = identifyCurrentCard(sidebarCardsForAdj);
         const currentSigForAdj = currentCardForAdj ? extractCardSignature(currentCardForAdj) : null;
@@ -1332,7 +1402,8 @@ async function validateCurrentReport() {
                 setStatus('✅ Bunker ROB Grid: ADJ values reconcile correctly against the previous and next reports.', 'success');
             }
         }
-    }
+        } // end else (!withinReportFailed) — cross-report ADJ block
+    } // end if (currentBunkerCheck.length > 0)
 
     // 5. GEOFORMS TIMELINE & COMPLIANCE SCENARIOS BRIDGE
     setStatus('Linking state parameters with Timeline Engine Matrix...', 'info');
@@ -1716,7 +1787,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v5.8)';
+    btn.innerText = '▶ Start Autopilot (v6.0.0)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -1756,7 +1827,7 @@ function setStatus(message, type = 'info') {
 function clearStatus() {
     const box = document.getElementById('autopilot-status');
     if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v5.8):</div>";
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.0.0):</div>";
     }
 }
 
@@ -1767,7 +1838,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v5.8)';
+        btn.innerText = '▶ Start Autopilot (v6.0.0)';
         btn.style.backgroundColor = '#2e7d32';
     }
 }
