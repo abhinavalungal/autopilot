@@ -99,6 +99,24 @@
 //             that actual elapsed time. This correctly handles cases where a
 //             vessel crosses a timezone boundary between reports (e.g. 24hrs
 //             on the clock but only 23 actual elapsed hours).
+//     [FIX - v5.10-B] WRONG "CURRENT CARD" SELECTED (root cause of bogus
+//             elapsed-time values like "215.00 hrs" for what was visibly a
+//             24hr gap): isBlueish()'s threshold was loose enough that a
+//             card's DEFAULT, unselected border colour (e.g. rgb(148,163,184),
+//             blue-channel margin ~36) also passed the "selection highlight"
+//             test — which is meant to only match the genuinely-selected
+//             card's distinct highlight colour (e.g. rgb(110,151,173), margin
+//             ~63). Since identifyCurrentCard() returns on the FIRST matching
+//             card in DOM order, this silently locked onto whichever card
+//             happened to be topmost in the sidebar instead of the actually-
+//             open one, feeding a completely wrong timestamp into both the
+//             steaming-hours elapsed-time check and the ADJ cross-report
+//             check. Fixed by (1) tightening the blue-margin threshold so only
+//             a clearly stronger blue cast qualifies, and (2) adding a
+//             border-WIDTH discriminator pass before the colour pass — the
+//             selected card is visibly thicker-bordered (e.g. 4px vs 1px)
+//             independent of exact colour values, which is more robust than
+//             colour-matching alone.
 // =========================================================================
 
 const CONFIG = {
@@ -249,11 +267,20 @@ function parseRgb(colorStr) {
 }
 
 // True if the colour reads as a "selection" blue (blue channel clearly dominant).
+// [FIX v5.10-B] The threshold was previously loose enough that an UNselected
+// card's default border (e.g. rgb(148,163,184), b-r=36) also passed this
+// test — identical in kind to the genuinely-selected highlight colour (e.g.
+// rgb(110,151,173), b-r=63), just less pronounced. Since identifyCurrentCard
+// returns on the FIRST match in DOM order, this caused it to silently lock
+// onto whichever card happened to be first/topmost in the sidebar instead of
+// the actually-selected one — which fed a completely wrong "current report"
+// timestamp into the steaming-hours elapsed-time check (and the ADJ check).
+// The margin is raised so only a clearly stronger blue cast passes.
 function isBlueish(colorStr) {
     const rgb = parseRgb(colorStr);
     if (!rgb) return false;
     const { r, g, b } = rgb;
-    return b > 100 && (b - r) > 15 && (b - g) > 10;
+    return b > 100 && (b - r) > 45 && (b - g) > 15;
 }
 
 // True if the colour reads as a status colour: green (approved) or red/pink (rejected).
@@ -819,6 +846,27 @@ function identifyCurrentCard(sidebarCards) {
     for (const card of sidebarCards) {
         if (card.getAttribute('aria-selected') === 'true') return card;
     }
+
+    // [FIX v5.10-B] Border-WIDTH pass: the selected card is visibly
+    // thicker-bordered than the rest (e.g. 4px vs 1px) regardless of the
+    // exact border colour, which is a more robust signal than colour
+    // matching alone — colour heuristics can false-positive against a
+    // default unselected border that happens to share the same hue family.
+    // Only trust this pass if exactly ONE card stands out from the rest.
+    const widths = sidebarCards.map(card => {
+        const w = parseFloat(window.getComputedStyle(card).borderWidth) || 0;
+        return { card, w };
+    });
+    const maxW = Math.max(...widths.map(x => x.w));
+    const cardsAtMax = widths.filter(x => x.w === maxW);
+    if (maxW > 0 && cardsAtMax.length === 1) {
+        const othersWidth = widths.filter(x => x.card !== cardsAtMax[0].card).map(x => x.w);
+        const allOthersThinner = othersWidth.every(w => w < maxW);
+        if (allOthersThinner && othersWidth.length > 0) {
+            return cardsAtMax[0].card;
+        }
+    }
+
     for (const card of sidebarCards) {
         const style = window.getComputedStyle(card);
         if (isBlueish(style.borderColor) || isBlueish(style.outlineColor) || isBlueish(style.boxShadow)) {
@@ -1129,6 +1177,18 @@ async function validateCurrentReport() {
 
                     const refLabel = `${nearestChecked.sig.date} ${nearestChecked.sig.time} ${nearestChecked.sig.utcOffset || '+00:00'}`;
                     const currLabel = `${currentSigForSteaming.date} ${currentSigForSteaming.time} ${currentSigForSteaming.utcOffset || '+00:00'}`;
+
+                    // [DIAGNOSTIC v5.10-A] Always log the raw parsed signatures
+                    // and resulting epoch values when there's a mismatch, so a
+                    // bad parse (wrong card picked, wrong offset captured,
+                    // truncated text, etc.) is visible immediately instead of
+                    // requiring re-investigation from scratch.
+                    if (Math.abs(actualElapsedHours - hours) > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
+                        setStatus(`🔍 DEBUG — current card rawText: "${currentSigForSteaming.rawText.replace(/\n/g, ' | ')}"`, 'warning');
+                        setStatus(`🔍 DEBUG — current parsed: date=${currentSigForSteaming.date} time=${currentSigForSteaming.time} offset=${currentSigForSteaming.utcOffset || '(none)'} epoch=${currentTs}`, 'warning');
+                        setStatus(`🔍 DEBUG — checked card rawText: "${nearestChecked.sig.rawText.replace(/\n/g, ' | ')}"`, 'warning');
+                        setStatus(`🔍 DEBUG — checked parsed: date=${nearestChecked.sig.date} time=${nearestChecked.sig.time} offset=${nearestChecked.sig.utcOffset || '(none)'} epoch=${checkedTs}`, 'warning');
+                    }
 
                     if (diff > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
                         errors.push(`Steaming hours (${hours}) does not match actual elapsed time (${actualElapsedHours.toFixed(2)} hrs) between this report (${currLabel}) and the nearest checked report (${refLabel}, ${nearestChecked.direction}).`);
