@@ -1,0 +1,20 @@
+name: Purge jsDelivr Cache
+
+# Fires on every push to main that touches autopilot.js
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'autopilot.js'
+
+jobs:
+  purge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Purge jsDelivr CDN cache for autopilot.js
+        run: |
+          echo "Purging jsDelivr cache..."
+          curl -s "https://purge.jsdelivr.net/gh/abhinavalungal/autopilot@main/autopilot.js"
+          echo ""
+          echo "Cache purge complete — CDN will now serve the latest autopilot.js"
