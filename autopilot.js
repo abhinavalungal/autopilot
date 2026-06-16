@@ -1,139 +1,19 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v6.0.0 (ROB Integrity & ADJ Enforcement)
-//   Fixes & Upgrades applied:
-//     [FIX-1 to 7] Maintained core timeline engine stability fixes.
-//     [FIX-8] Connected bridge between DOM scrapers and compliance matrix.
-//     [UPGRADE - v5.2] OVERRIDE INTERCEPTOR: Automatically clears 0-distance
-//             warning modals inside an In Port report context.
-//     [UPGRADE - v5.3] DUPLICATE CHECKER: Validates report uniqueness
-//             by verifying date/timestamps against the next pending report.
-//     [FIX - v5.4] CRITICAL ADJ STRICTNESS: Explicitly targets and extracts
-//             the "ADJ" column (inputs or static text). Reports are immediately
-//             rejected if any ADJ cell value is non-zero.
-//     [UPGRADE - v5.5] VERBOSE AUDIT LOGS: Added explicit, descriptive on-screen
-//             success confirmations for each step to make approvals fully transparent.
-//     [FIX - v5.6-A] STEAMING HOURS: In Port context allows 0–24 hrs (was 16–26).
-//     [FIX - v5.6-B] PORT WHITELIST: Added DISCHARGING and IDLE event types.
-//     [FIX - v5.6-C] LOCATION DETECTION: Report type now resolved from the actual
-//             Location dropdown value, preventing false "At Sea" context errors.
-//     [FIX - v5.7-A] DEPARTURE CONTEXT: When a "Start of Sea Passage" field is
-//             populated, the report covers both a port phase (pre-departure) and a
-//             sea phase. Both PORT and SEA event whitelists are now accepted for
-//             these mixed-period reports, eliminating false "unauthorized event"
-//             errors on valid departure Noon reports.
-//     [FIX - v5.7-B] CHRONOLOGICAL NAVIGATION: The sidebar lists reports in
-//             reverse-chronological order (newest at top). Autopilot previously
-//             searched downward (toward older reports) and wrapped to the top,
-//             causing it to jump to the newest pending report instead of the
-//             chronologically next one. Navigation now searches upward (toward
-//             lower DOM indices = newer dates), matching true processing order.
-//     [FIX - v5.7-C] DUPLICATE CHECKER REWRITE: The previous implementation only
-//             compared the timestamp of the current card against the immediately
-//             adjacent card. A 4-field signature { reportType, vesselName, date,
-//             time } from every sidebar card was used to scan the ENTIRE list
-//             for a full match.
-//     [FIX - v5.8-A] CURRENT-CARD DETECTION OVERHAUL: The old "non-white
-//             background = selected" heuristic mistook APPROVED (green) and
-//             REJECTED (red/pink) status cards for the active card whenever the
-//             active card's highlight border colour didn't exactly match one of
-//             two hardcoded blue hex values. Border/outline/box-shadow detection
-//             is now a general "blue-ish hue" test, and the background-colour
-//             fallback explicitly excludes green/red status colours.
-//     [FIX - v5.8-B] 5-FIELD DUPLICATE SIGNATURE: Added a "routeInfo" field
-//             (voyage number + port/location text) to the duplicate signature.
-//             Two reports that merely share { reportType, vesselName, date,
-//             time } but differ in voyage number / port are NO LONGER treated
-//             as duplicates — this was the root cause of false-positive
-//             lockouts (e.g. an Arrival Report on Voy 326/Brooklyn vs an
-//             Arrival Report on Voy 32026/N-A sharing the same date+time).
-//     [FIX - v5.8-C] NO MORE REMARKS-FIELD WRITES: Removed addValidationComment(),
-//             which previously matched the report form's own "Remarks" field
-//             (id/name containing "remark"). Duplicate handling no longer writes
-//             anything into the report body.
-//     [UPGRADE - v5.8-D] REJECT-ON-DUPLICATE FLOW: When a genuine duplicate is
-//             found, the autopilot now clicks "Reject", fills the rejection
-//             reason field INSIDE the resulting confirmation dialog only (never
-//             the page's Remarks field) with a message describing exactly which
-//             existing report it matched, then confirms the rejection.
-//     [UPGRADE - v5.8-E] VERBOSE DUPLICATE AUDIT LOGS: On a duplicate lockout,
-//             the log now prints the full signature of BOTH the current report
-//             and the matched existing report (type, vessel, route/voyage, date,
-//             time) for fast troubleshooting.
-//     [FIX - v6.0.0-A] WITHIN-REPORT ROB INTEGRITY (NEW CHECK — was completely
-//             absent in all prior versions): For every fuel-type row, Last ROB +
-//             ADJ MUST equal ROB Start on the SAME report. When ADJ = 0 this
-//             simplifies to Last ROB = ROB Start. This check now runs immediately
-//             on the freshly-scraped current report data, before any cross-report
-//             navigation, and independently of whether adjacent sidebar cards can
-//             be identified. A mismatch sets isValid = false and halts approval.
-//             This was the root cause of the "ADJ = 0 validation not working"
-//             symptom: without this within-report gate, a report whose Last ROB
-//             differed from its ROB Start by any amount was approved silently.
-//     [FIX - v6.0.0-B] VALIDATION GUARD TIGHTENED: The within-report ROB check
-//             (above) now also runs on currentBunkerCheck BEFORE the cross-report
-//             navigation block, so it can never be bypassed by a failed
-//             identifyCurrentCard() call. Previously, if the sidebar card
-//             detection returned null, the entire bunker validation section was
-//             skipped wholesale and approval proceeded unchecked.
-//     [FIX - v5.9] ADJ VALIDATION OVERHAUL: The previous "ADJ must be exactly 0"
-//             rule rejected any non-zero ADJ outright WITHOUT checking it against
-//             anything, and a separate same-report Last-ROB-vs-ROB-Start check
-//             ignored ADJ entirely — together these meant ADJ was effectively
-//             never properly validated (reports with ADJ = 0 sailed through with
-//             no real check performed at all). ADJ is now reconciled against the
-//             vessel's adjacent reports:
-//               - This report's "Last ROB" must continue from the PREVIOUS
-//                 report's "ROB Start" for the same vessel.
-//               - This report's "ROB Start + ADJ" must equal the NEXT report's
-//                 "Last ROB" for the same vessel — the real test of whether the
-//                 ADJ entered here is correct.
-//             If no future (next chronological) report exists for this vessel,
-//             ADJ cannot be reconciled. The autopilot now HALTS in that case —
-//             reporting "No future report is available for validation. Reporting
-//             appears to be complete for this vessel." — and does NOT auto-approve
-//             based on the missing data.
-//     [FIX - v5.9-A] ADJ ROW MATCHING HARDENED: fuel-row matching between the
-//             current report and the next report's bunker grid previously
-//             relied on exact label-text equality. Any cosmetic difference in
-//             rendered label text (whitespace, footnote markers, or a
-//             positional fallback label like "Line 1") caused the match to
-//             silently fail, which skipped the entire ADJ reconciliation check
-//             with NO warning — a non-zero, incorrect ADJ could pass through
-//             unexamined. Labels are now normalised (footnote/whitespace/case
-//             insensitive) and a row-position fallback is used if no label
-//             match is found. If ADJ is non-zero and STILL can't be matched to
-//             any row in the next report, that is now a hard validation
-//             failure instead of a silent skip.
-//     [NEW - v5.10] AT-SEA STEAMING HOURS ELAPSED-TIME CHECK: for "At Sea
-//             (N/A)" reports, Steaming Hours is no longer checked only against
-//             a static 16-26hr range. The bot now finds the nearest already-
-//             CHECKED (green) sidebar card for the same vessel, computes the
-//             true elapsed time between that report's timestamp and the
-//             current report's timestamp (both converted to real UTC instants
-//             using each report's own UTC offset, e.g. +07:00 vs +08:00), and
-//             flags a warning if the reported Steaming Hours doesn't match
-//             that actual elapsed time. This correctly handles cases where a
-//             vessel crosses a timezone boundary between reports (e.g. 24hrs
-//             on the clock but only 23 actual elapsed hours).
-//     [FIX - v5.10-B] WRONG "CURRENT CARD" SELECTED (root cause of bogus
-//             elapsed-time values like "215.00 hrs" for what was visibly a
-//             24hr gap): isBlueish()'s threshold was loose enough that a
-//             card's DEFAULT, unselected border colour (e.g. rgb(148,163,184),
-//             blue-channel margin ~36) also passed the "selection highlight"
-//             test — which is meant to only match the genuinely-selected
-//             card's distinct highlight colour (e.g. rgb(110,151,173), margin
-//             ~63). Since identifyCurrentCard() returns on the FIRST matching
-//             card in DOM order, this silently locked onto whichever card
-//             happened to be topmost in the sidebar instead of the actually-
-//             open one, feeding a completely wrong timestamp into both the
-//             steaming-hours elapsed-time check and the ADJ cross-report
-//             check. Fixed by (1) tightening the blue-margin threshold so only
-//             a clearly stronger blue cast qualifies, and (2) adding a
-//             border-WIDTH discriminator pass before the colour pass — the
-//             selected card is visibly thicker-bordered (e.g. 4px vs 1px)
-//             independent of exact colour values, which is more robust than
-//             colour-matching alone.
+//   MARITIME REPORT AUTOPILOT — v6.0.4 (ROB Validation Rule Correction)
+//   Change from v6.0.3:
+//   - Within-report ROB check Case B removed: rows where both Last ROB and
+//     ROB Start are empty/null are now always skipped silently, regardless
+//     of whether input elements exist in the DOM. Only rows with at least
+//     one value populated are validated.
+//   - Case D arithmetic rule replaced: the old "Last ROB + ADJ = ROB Start"
+//     formula is removed. Two independent rules are now enforced instead:
+//       Rule 1 — Last ROB must equal ROB Start (exact match, within tolerance).
+//       Rule 2 — ADJ must always be 0.
+//     Both rules are checked independently so both errors surface if both
+//     conditions fail simultaneously.
 // =========================================================================
+
+(function () {
 
 const CONFIG = {
     REQUIRE_BUNKER_DATA: true,
@@ -142,7 +22,7 @@ const CONFIG = {
     STEAMING_HOURS_IN_PORT_MIN: 0,
     STEAMING_HOURS_IN_PORT_MAX: 24,
     ADJ_TOLERANCE: 0.01,
-    STEAMING_HOURS_ELAPSED_TOLERANCE: 0.1, // hrs; allows small rounding slack
+    STEAMING_HOURS_ELAPSED_TOLERANCE: 0.1,
     SLEEP_POLL_MS: 500,
     SLEEP_POST_CLICK_MS: 1200,
     DOM_STABLE_HEADSTART_MS: 400,
@@ -270,10 +150,6 @@ function findSteamingHoursInput() {
 // ---------------------------------------------------------------------------
 //   COLOUR HEURISTICS
 // ---------------------------------------------------------------------------
-// Used to identify the "active/selected" sidebar card without relying on a
-// small hardcoded set of exact hex values, and to avoid mistaking status
-// colours (approved = green, rejected = red/pink) for the selection highlight.
-// ---------------------------------------------------------------------------
 
 function parseRgb(colorStr) {
     if (!colorStr) return null;
@@ -282,16 +158,6 @@ function parseRgb(colorStr) {
     return { r: parseInt(m[1], 10), g: parseInt(m[2], 10), b: parseInt(m[3], 10) };
 }
 
-// True if the colour reads as a "selection" blue (blue channel clearly dominant).
-// [FIX v5.10-B] The threshold was previously loose enough that an UNselected
-// card's default border (e.g. rgb(148,163,184), b-r=36) also passed this
-// test — identical in kind to the genuinely-selected highlight colour (e.g.
-// rgb(110,151,173), b-r=63), just less pronounced. Since identifyCurrentCard
-// returns on the FIRST match in DOM order, this caused it to silently lock
-// onto whichever card happened to be first/topmost in the sidebar instead of
-// the actually-selected one — which fed a completely wrong "current report"
-// timestamp into the steaming-hours elapsed-time check (and the ADJ check).
-// The margin is raised so only a clearly stronger blue cast passes.
 function isBlueish(colorStr) {
     const rgb = parseRgb(colorStr);
     if (!rgb) return false;
@@ -299,8 +165,6 @@ function isBlueish(colorStr) {
     return b > 100 && (b - r) > 45 && (b - g) > 15;
 }
 
-// True if the colour reads as a status colour: green (approved) or red/pink (rejected).
-// Used to EXCLUDE these from "selected card" background heuristics.
 function isStatusColor(colorStr) {
     const rgb = parseRgb(colorStr);
     if (!rgb) return false;
@@ -310,10 +174,6 @@ function isStatusColor(colorStr) {
     return isGreenish || isReddish;
 }
 
-// True if the colour reads as "checked/approved" green specifically (not red).
-// Checks the same green channel dominance rule as isStatusColor but isolates
-// just the green case, since steaming-hours validation needs to distinguish
-// "already checked" (green) cards from everything else.
 function isGreenish(colorStr) {
     const rgb = parseRgb(colorStr);
     if (!rgb) return false;
@@ -321,53 +181,33 @@ function isGreenish(colorStr) {
     return (g - r) > 10 && (g - b) > 10;
 }
 
-// Returns true if a sidebar card is marked "checked" (green border/background).
-// Checks both the border-color and background-color so it works whether the
-// UI signals "checked" via a green outline, a green fill, or both.
 function isCardChecked(card) {
     const style = window.getComputedStyle(card);
     return isGreenish(style.borderColor) || isGreenish(style.backgroundColor);
 }
 
 // ---------------------------------------------------------------------------
-//   DUPLICATE TIMELINE SCANNER  [REWRITTEN v5.7-C, HARDENED v5.8-A/B]
-// ---------------------------------------------------------------------------
-// Extracts a 5-field identity signature from a sidebar card's text:
-//   { reportType, vesselName, date, time, routeInfo }
-// "routeInfo" captures the voyage number + port/location text that appears
-// between the vessel name line and the date/time line. A duplicate is only
-// triggered when ALL applicable fields match another card in the sidebar.
+//   DUPLICATE TIMELINE SCANNER
 // ---------------------------------------------------------------------------
 
 function extractCardSignature(card) {
     const raw = (card.innerText || '').trim();
     const lines = raw.split('\n').map(l => l.trim()).filter(Boolean);
 
-    // Line 0: Report type  e.g. "Noon Report V101"
     const reportType = lines[0] ? lines[0].replace(/[,.]$/, '').trim() : '';
-
-    // Line 1: Vessel name  e.g. "SUNNY APATITE,"
     const vesselName = lines[1] ? lines[1].replace(/[,.]$/, '').trim().toUpperCase() : '';
 
-    // Find the line containing a full date+time pattern: "2026-06-09 12:00 +08:00"
-    // Also handles dd.mm.yyyy or dd/mm/yyyy separators for flexibility.
-    // [v5.10] Also captures the trailing UTC offset (e.g. "+07:00", "-05:30")
-    // when present on the same line, since cross-report elapsed-time
-    // calculations need the real instant in time, not just the local clock
-    // reading — two reports logged at "12:00" in different offsets are NOT
-    // 24 hours apart.
     let date = '';
     let time = '';
-    let utcOffset = ''; // e.g. "+07:00"; '' if not found on the line
+    let utcOffset = '';
     let dateLineIndex = -1;
     const dtPattern = /(\d{4}[-./]\d{2}[-./]\d{2}|\d{2}[-./]\d{2}[-./]\d{4})\s+(\d{2}:\d{2})(?:[:\d]*)?\s*([+-]\d{2}:?\d{2})?/;
     for (let i = 0; i < lines.length; i++) {
         const m = lines[i].match(dtPattern);
         if (m) {
-            date = m[1].replace(/[./]/g, '-');  // normalise separator to -
+            date = m[1].replace(/[./]/g, '-');
             time = m[2];
             if (m[3]) {
-                // Normalise "+0700" -> "+07:00" so it's always Date()-parseable.
                 utcOffset = m[3].length === 5 ? `${m[3].slice(0, 3)}:${m[3].slice(3)}` : m[3];
             }
             dateLineIndex = i;
@@ -375,10 +215,6 @@ function extractCardSignature(card) {
         }
     }
 
-    // [v5.8-B] Capture voyage number / port-location info: any lines between
-    // the vessel name line and the date/time line. e.g. "Voy 032026, BROOKLYN
-    // (UNITED STATES)" — normalised so wrapping/punctuation differences don't
-    // affect comparison.
     let routeInfo = '';
     if (dateLineIndex > 1) {
         routeInfo = lines.slice(2, dateLineIndex)
@@ -392,11 +228,6 @@ function extractCardSignature(card) {
     return { reportType, vesselName, date, time, utcOffset, routeInfo, rawText: raw };
 }
 
-// A duplicate requires the core 4 fields to match AND, if either card has
-// route info (voyage number / port), that info must match too. This prevents
-// two different reports (different voyage / different port) that happen to
-// share { reportType, vesselName, date, time } from being flagged as the
-// same report.
 function signaturesMatch(a, b) {
     const coreMatch = (
         a.reportType  !== '' && b.reportType  !== '' && a.reportType  === b.reportType  &&
@@ -420,10 +251,7 @@ function describeSignature(sig) {
         + ` — ${sig.date || '????-??-??'} ${sig.time || '??:??'}`;
 }
 
-// Returns null if no duplicate is found, otherwise an object describing the
-// current report's signature and the matched existing report's signature.
 function checkIsDuplicateReport() {
-    // Collect all sidebar report cards
     const sidebarCards = Array.from(
         document.querySelectorAll('.card, div[class*="card"], .report-item, li[class*="report"]')
     ).filter(card => {
@@ -439,13 +267,11 @@ function checkIsDuplicateReport() {
 
     if (sidebarCards.length < 2) return null;
 
-    // Identify the currently-open card using multiple heuristics (most reliable first)
     const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
                             'current', 'focused', 'open', 'p-listbox-item-selected'];
 
     let currentCard = null;
 
-    // Pass 1: explicit active CSS class
     for (const card of sidebarCards) {
         if (ACTIVE_CLASSES.some(cls => card.classList.contains(cls))) {
             currentCard = card;
@@ -453,7 +279,6 @@ function checkIsDuplicateReport() {
         }
     }
 
-    // Pass 2: aria-selected="true"
     if (!currentCard) {
         for (const card of sidebarCards) {
             if (card.getAttribute('aria-selected') === 'true') {
@@ -463,9 +288,6 @@ function checkIsDuplicateReport() {
         }
     }
 
-    // Pass 3 [v5.8-A]: highlight border / outline / box-shadow reading as
-    // "selection blue" — a general hue test rather than two hardcoded hex
-    // values, so it correctly catches whatever blue this app's theme uses.
     if (!currentCard) {
         for (const card of sidebarCards) {
             const style = window.getComputedStyle(card);
@@ -480,10 +302,6 @@ function checkIsDuplicateReport() {
         }
     }
 
-    // Pass 4 [v5.8-A]: background-colour differentiation (non-white,
-    // non-transparent = highlighted) — EXCLUDING green (approved) and
-    // red/pink (rejected) status colours, which previously caused this pass
-    // to mis-identify an approved/rejected card as the "active" one.
     if (!currentCard) {
         for (const card of sidebarCards) {
             const bg = window.getComputedStyle(card).backgroundColor;
@@ -497,20 +315,16 @@ function checkIsDuplicateReport() {
         }
     }
 
-    // Pass 5: last resort — treat first card as current (prevents silent skip)
     if (!currentCard) {
         currentCard = sidebarCards[0];
     }
 
     const currentSig = extractCardSignature(currentCard);
 
-    // Guard: if we couldn't extract a meaningful signature, skip duplicate check
-    // to avoid false lockouts (empty vessel name or missing date/time)
     if (!currentSig.vesselName || !currentSig.date || !currentSig.time) {
         return null;
     }
 
-    // Scan ALL other cards for a full signature match
     for (const card of sidebarCards) {
         if (card === currentCard) continue;
         const sig = extractCardSignature(card);
@@ -529,12 +343,9 @@ function checkIsDuplicateReport() {
 function extractReportContext() {
     let reportType = "In Port Report";
 
-    // [FIX v5.6-C] Primary: resolve report type from the actual Location field.
-    // This prevents false "At Sea" classification when the vessel is In Port.
     let locationValue = '';
     for (const ctx of getAllContexts()) {
         if (!ctx) continue;
-        // Try select dropdown first (most common)
         const locSelect = ctx.querySelector(
             'select[id*="location" i], select[name*="location" i]'
         );
@@ -542,7 +353,6 @@ function extractReportContext() {
             locationValue = locSelect.options[locSelect.selectedIndex].text.trim().toLowerCase();
             break;
         }
-        // Fallback: text input
         const locInput = ctx.querySelector(
             'input[id*="location" i], input[name*="location" i]'
         );
@@ -557,7 +367,6 @@ function extractReportContext() {
     } else if (locationValue.includes('at sea') || locationValue.includes('sea')) {
         reportType = "At Sea NOON Report";
     } else {
-        // Fallback: scan panel/page headers when location field is unavailable
         const subHeaders = queryAllContexts('.p-panel-header, h1, h2, h3, .report-title');
         for (const sh of subHeaders) {
             const txt = (sh.innerText || '').toUpperCase();
@@ -568,19 +377,12 @@ function extractReportContext() {
         }
     }
 
-    // [FIX v5.7-A] DEPARTURE CONTEXT DETECTION
-    // A Noon report covering a vessel departure has a populated "Start of Sea Passage"
-    // field. Its 24-hour period begins while the vessel is still in port and ends at sea,
-    // so the Events table legitimately contains BOTH port events (pre-departure) and sea
-    // events (post-departure). Detect this by checking for any visible, populated input
-    // whose id/name/label matches "Start of Sea Passage" / "SOSP".
     let isDepartureReport = false;
     if (reportType === 'At Sea NOON Report') {
         outerLoop:
         for (const ctx of getAllContexts()) {
             if (!ctx) continue;
 
-            // Strategy A: find inputs by id/name attribute
             const allInputs = Array.from(ctx.querySelectorAll('input'));
             for (const inp of allInputs) {
                 const id   = (inp.id   || '').toLowerCase();
@@ -596,7 +398,6 @@ function extractReportContext() {
                 }
             }
 
-            // Strategy B: find labels containing "Start of Sea Passage" then check nearby input
             const labelEls = Array.from(ctx.querySelectorAll(
                 'label, span, div, legend, .p-column-title, .field-label, th'
             ));
@@ -769,9 +570,6 @@ function validatePortEvents() {
 // ---------------------------------------------------------------------------
 
 function locateTrueBunkerContainer() {
-    // [FIX v6.0.0-C] Match "BUNKERS ROB", "BUNKER ROB", "BUNKER R.O.B" etc.
-    // The old code did an exact === 'BUNKER ROB' check which failed whenever
-    // the app rendered the legend as "BUNKERS ROB" (plural).
     function isBunkerRobHeader(text) {
         const t = text.trim().toUpperCase().replace(/[.\s]+/g, ' ');
         return (t.includes('BUNKER') && t.includes('ROB')) || t === 'BUNKER';
@@ -820,10 +618,6 @@ function locateBunkerRows() {
     );
     if (rows.length === 0) rows = Array.from(bunkerContainer.querySelectorAll('tr'));
 
-    // [FIX v6.0.0-C] Also catch rows identified by data-td-name attributes.
-    // This app renders <tr id="atseabunkerrobdetails..."> with <td data-td-name="...">
-    // children. If the standard row selectors missed them, grab any <tr> that
-    // contains at least one <td data-td-name> cell.
     if (rows.length === 0) {
         rows = Array.from(bunkerContainer.querySelectorAll('tr')).filter(tr =>
             tr.querySelector('td[data-td-name]')
@@ -843,18 +637,15 @@ function locateBunkerRows() {
             const style = window.getComputedStyle(inp);
             return style.display !== 'none' && style.visibility !== 'hidden';
         });
-        // Accept rows that have at least 1 visible input OR at least 2 data-td-name cells
-        // (some columns like ADJ may be read-only text, not inputs).
         const dataCells = Array.from(row.querySelectorAll('td[data-td-name]'));
         return inputs.length >= 1 || dataCells.length >= 2;
     });
 }
 
 // ---------------------------------------------------------------------------
-//   VESSEL TIMELINE & CROSS-REPORT ADJ HELPERS  [FIX v5.9]
+//   VESSEL TIMELINE & CROSS-REPORT ADJ HELPERS
 // ---------------------------------------------------------------------------
 
-// Returns the full set of sidebar report cards (same filter used elsewhere).
 function getAllReportCards() {
     return Array.from(
         document.querySelectorAll('.card, div[class*="card"], .report-item, li[class*="report"]')
@@ -870,9 +661,6 @@ function getAllReportCards() {
     });
 }
 
-// Identifies the currently-open sidebar card using the same multi-pass
-// heuristics as the duplicate checker (active class -> aria-selected ->
-// blue-ish highlight -> non-status background -> first card as last resort).
 function identifyCurrentCard(sidebarCards) {
     const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
                             'current', 'focused', 'open', 'p-listbox-item-selected'];
@@ -884,12 +672,6 @@ function identifyCurrentCard(sidebarCards) {
         if (card.getAttribute('aria-selected') === 'true') return card;
     }
 
-    // [FIX v5.10-B] Border-WIDTH pass: the selected card is visibly
-    // thicker-bordered than the rest (e.g. 4px vs 1px) regardless of the
-    // exact border colour, which is a more robust signal than colour
-    // matching alone — colour heuristics can false-positive against a
-    // default unselected border that happens to share the same hue family.
-    // Only trust this pass if exactly ONE card stands out from the rest.
     const widths = sidebarCards.map(card => {
         const w = parseFloat(window.getComputedStyle(card).borderWidth) || 0;
         return { card, w };
@@ -919,22 +701,12 @@ function identifyCurrentCard(sidebarCards) {
     return sidebarCards[0] || null;
 }
 
-// Converts a card signature's { date, time, utcOffset } into a true UTC
-// epoch value (milliseconds), so elapsed-time math between two reports is
-// correct even when their UTC offsets differ. Falls back to treating the
-// timestamp as UTC if no offset was captured on the card (better than
-// silently using the browser's local zone, which would be wrong for a
-// server-side audit of a vessel's logged times).
-// Returns NaN if the signature lacks a usable date/time.
 function reportTimestamp(sig) {
     if (!sig || !sig.date || !sig.time) return NaN;
     const offset = sig.utcOffset || '+00:00';
     return new Date(`${sig.date}T${sig.time}:00${offset}`).getTime();
 }
 
-// Given the current report's signature, scans the sidebar for the
-// chronologically nearest PREVIOUS and FUTURE report cards belonging to the
-// SAME vessel. Returns { previousCard, futureCard } — either may be null.
 function findAdjacentVesselReports(currentSig, sidebarCards, currentCard) {
     const currentTs = reportTimestamp(currentSig);
 
@@ -963,13 +735,6 @@ function findAdjacentVesselReports(currentSig, sidebarCards, currentCard) {
     return { previousCard, futureCard };
 }
 
-// Given the current report's signature, scans the sidebar for the
-// chronologically nearest CHECKED (green) report card belonging to the SAME
-// vessel, searching both backward and forward in time and returning
-// whichever is closer. Used by the At-Sea steaming-hours elapsed-time check,
-// which needs a known-good reference point to measure against.
-// Returns { card, sig, direction } or null if no checked card exists for
-// this vessel.
 function findNearestCheckedCard(currentSig, sidebarCards, currentCard) {
     const currentTs = reportTimestamp(currentSig);
     if (isNaN(currentTs)) return null;
@@ -997,30 +762,15 @@ function findNearestCheckedCard(currentSig, sidebarCards, currentCard) {
     return best;
 }
 
+// ---------------------------------------------------------------------------
+//   BUNKER SNAPSHOT SCRAPER
+// ---------------------------------------------------------------------------
 
-// one entry per fuel-type row with { fuelTypeLabel, lastRob, robStart, adj }
-// plus references to the live input/cell elements (for highlighting).
-//
-// [FIX v6.0.0] HEADER-SCAN COLUMN DETECTION:
-// The old approach relied on .p-column-title elements being present in every
-// data cell. When those are absent (mobile renders, collapsed tables, or plain
-// <td> layouts), ALL title lookups returned '' and the positional fallback
-// blindly assigned rowInputs[0]=lastRob / rowInputs[1]=robStart, which is
-// wrong whenever the column order differs or there's a label cell before the
-// inputs. The new approach:
-//   1. PRIMARY — scan the table's <thead> (or first <tr> of <th> cells) once
-//      to build a column-index map: { lastRobCol, robStartCol, adjCol }.
-//   2. SECONDARY — scan every data cell's own text/title/input id+name (as
-//      before) to catch inline-label tables that have no separate header row.
-//   3. FALLBACK — if neither method resolves both columns, use input position
-//      within the row (0=lastRob, 1=robStart, 2=adj), same as before.
 function scrapeBunkerSnapshot() {
     const bunkerContainer = locateTrueBunkerContainer();
     const bunkerRows = locateBunkerRows();
     const snapshot = [];
 
-    // --- PASS 1: build a header-based column-index map ---
-    // Keywords tested against the full normalised header cell text.
     const LAST_ROB_KEYS  = ['last rob', 'prev rob', 'previous rob', 'rob (previous)', 'rob prev'];
     const ROB_START_KEYS = ['rob start', 'start rob', 'opening rob', 'rob (start)', 'rob(start)'];
     const ADJ_KEYS       = ['adj', 'adjustment'];
@@ -1030,8 +780,6 @@ function scrapeBunkerSnapshot() {
     let adjCol      = -1;
 
     if (bunkerContainer) {
-        // Look for <th> cells in the container — they may be in a <thead> or
-        // in the first <tr> that only contains <th> elements.
         const thCells = Array.from(bunkerContainer.querySelectorAll('th'));
         if (thCells.length >= 2) {
             thCells.forEach((th, colIdx) => {
@@ -1043,7 +791,6 @@ function scrapeBunkerSnapshot() {
         }
     }
 
-    // Helper: extract a numeric value from an element (input or cell text).
     function numVal(el) {
         if (!el) return null;
         const raw = el.tagName === 'INPUT' ? el.value : el.innerText;
@@ -1057,13 +804,11 @@ function scrapeBunkerSnapshot() {
         const cells = Array.from(row.querySelectorAll('td'));
         if (cells.length === 0) return;
 
-        // Label is always the first cell's text (strip footnote markers).
         const rawLabel = (cells[0].innerText || '').trim().split('\n')[0];
         const normalisedLabel = rawLabel.replace(/[*†‡\d]+$/g, '').replace(/\s+/g, ' ').trim().toUpperCase();
         const fuelTypeLabel = normalisedLabel || `__ROW_${index}`;
         const displayLabel  = rawLabel || `Line ${index + 1}`;
 
-        // Collect all visible inputs in this row for positional fallback.
         const allInputs = cells.flatMap(c =>
             Array.from(c.querySelectorAll('input')).filter(inp => {
                 if (inp.type === 'hidden' || inp.disabled) return false;
@@ -1079,9 +824,7 @@ function scrapeBunkerSnapshot() {
         let hasAdjColumn  = false;
         let adjElementToHighlight = null;
 
-        // --- PASS 2a: data-td-name attributes (highest priority — seen in this app's DOM) ---
-        // The app renders <td data-td-name="lastRemaining">, <td data-td-name="robstart">,
-        // <td data-td-name="adj"> etc. This is the most reliable signal when present.
+        // PASS 2a: data-td-name attributes
         cells.forEach(cell => {
             const tdName = (cell.getAttribute('data-td-name') || '').toLowerCase().replace(/[_\-\s]/g, '');
             const inp    = cell.querySelector('input');
@@ -1099,7 +842,7 @@ function scrapeBunkerSnapshot() {
             }
         });
 
-        // --- PASS 2b: header-index map (when <th> headers exist and pass 2a didn't find everything) ---
+        // PASS 2b: header-index map
         if (!lastRobInput  && lastRobCol  >= 0 && cells[lastRobCol])  lastRobInput  = cells[lastRobCol].querySelector('input')  || null;
         if (!robStartInput && robStartCol >= 0 && cells[robStartCol]) robStartInput = cells[robStartCol].querySelector('input') || null;
         if (!hasAdjColumn  && adjCol >= 0 && cells[adjCol]) {
@@ -1115,7 +858,7 @@ function scrapeBunkerSnapshot() {
             }
         }
 
-        // --- PASS 2c: per-cell text / id / name scan (inline-label tables) ---
+        // PASS 2c: per-cell text / id / name scan
         if (!lastRobInput || !robStartInput) {
             cells.forEach(cell => {
                 const titleEl  = cell.querySelector('.p-column-title');
@@ -1140,7 +883,7 @@ function scrapeBunkerSnapshot() {
             });
         }
 
-        // --- PASS 2d: positional fallback (3-input row → [0]=lastRob, [1]=robStart, [2]=adj) ---
+        // PASS 2d: positional fallback
         if ((!lastRobInput || !robStartInput) && allInputs.length >= 2) {
             if (!lastRobInput)  lastRobInput  = allInputs[0];
             if (!robStartInput) robStartInput = allInputs[1];
@@ -1151,7 +894,6 @@ function scrapeBunkerSnapshot() {
             }
         }
 
-        // Final ADJ value.
         let finalAdjValue = 0;
         if (adjInput) {
             finalAdjValue = parseFloat((adjInput.value || '').replace(/,/g, '').trim()) || 0;
@@ -1184,9 +926,6 @@ function scrapeBunkerSnapshot() {
 //   DIALOG / MODAL HELPERS
 // ---------------------------------------------------------------------------
 
-// Returns the currently visible modal/dialog element, if any. Used to scope
-// "reason for rejection" field lookups so they NEVER touch the report form's
-// own Remarks field.
 function findOpenDialog() {
     const candidates = queryAllContexts(
         '.p-dialog, [role="dialog"], .modal, .p-confirm-dialog, .p-overlaypanel'
@@ -1201,18 +940,18 @@ function findOpenDialog() {
 }
 
 // ---------------------------------------------------------------------------
-//   CORE VALIDATION RUNNER WITH VERBOSE AUDITING
+//   CORE VALIDATION RUNNER
 // ---------------------------------------------------------------------------
 
 async function validateCurrentReport() {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v6.0.0)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v6.0.3)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     let isValid = true;
     const errors = [];
 
-    // 1. DUPLICATE TIMESTAMP SCAN  [v5.8 hardened]
+    // 1. DUPLICATE TIMESTAMP SCAN
     setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
     const duplicateMatch = checkIsDuplicateReport();
     if (duplicateMatch) {
@@ -1252,7 +991,6 @@ async function validateCurrentReport() {
     }
 
     // 3. STEAMING HOURS VALIDATION
-    // [FIX v5.6-A] Resolve context early so steaming bounds are location-aware.
     const earlyContext = extractReportContext();
     const steamMin = earlyContext.reportType === 'In Port Report'
         ? CONFIG.STEAMING_HOURS_IN_PORT_MIN
@@ -1277,14 +1015,6 @@ async function validateCurrentReport() {
             setStatus(`✅ Steaming Hours Matrix: Value (${hours} hrs) within safe parameters [${steamLabel}] for ${earlyContext.reportType}.`, 'success');
         }
 
-        // [NEW v5.10] AT SEA (N/A) ELAPSED-TIME CROSS-CHECK
-        // Static bounds (16-26 hrs) only catch wildly wrong values. This
-        // check verifies the reported Steaming Hours actually matches the
-        // real elapsed time between this report and the nearest ALREADY
-        // CHECKED (green) report for the same vessel — calculated from true
-        // UTC instants, so a timezone change between reports (e.g. +07:00 ->
-        // +08:00) is correctly reflected as fewer/more elapsed hours, not
-        // assumed to be exactly 24.
         if (earlyContext.reportType === 'At Sea NOON Report') {
             const sidebarCardsForSteaming = getAllReportCards();
             const currentCardForSteaming = identifyCurrentCard(sidebarCardsForSteaming);
@@ -1308,11 +1038,6 @@ async function validateCurrentReport() {
                     const refLabel = `${nearestChecked.sig.date} ${nearestChecked.sig.time} ${nearestChecked.sig.utcOffset || '+00:00'}`;
                     const currLabel = `${currentSigForSteaming.date} ${currentSigForSteaming.time} ${currentSigForSteaming.utcOffset || '+00:00'}`;
 
-                    // [DIAGNOSTIC v5.10-A] Always log the raw parsed signatures
-                    // and resulting epoch values when there's a mismatch, so a
-                    // bad parse (wrong card picked, wrong offset captured,
-                    // truncated text, etc.) is visible immediately instead of
-                    // requiring re-investigation from scratch.
                     if (Math.abs(actualElapsedHours - hours) > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
                         setStatus(`🔍 DEBUG — current card rawText: "${currentSigForSteaming.rawText.replace(/\n/g, ' | ')}"`, 'warning');
                         setStatus(`🔍 DEBUG — current parsed: date=${currentSigForSteaming.date} time=${currentSigForSteaming.time} offset=${currentSigForSteaming.utcOffset || '(none)'} epoch=${currentTs}`, 'warning');
@@ -1336,29 +1061,27 @@ async function validateCurrentReport() {
         setStatus('ℹ️ Steaming Hours: Field unpopulated or not applicable to this report layout index.', 'info');
     }
 
-    // 4. ADJ CROSS-REPORT RECONCILIATION (BUNKER ROB GRID)  [FIX v5.9]
-    // ADJ is no longer rejected just for being non-zero. Instead, the ADJ
-    // figures on THIS report are validated against the adjacent reports for
-    // the same vessel:
-    //   - This report's "Last ROB" should continue from the previous
-    //     report's "ROB Start".
-    //   - This report's adjusted closing balance (ROB Start + ADJ) should
-    //     flow forward into the next report's "Last ROB".
-    // A future report is REQUIRED to perform this reconciliation. If none
-    // exists, validation halts WITHOUT approving or rejecting the report.
+    // 4. ADJ CROSS-REPORT RECONCILIATION (BUNKER ROB GRID)
     setStatus('Targeting isolated Bunker ROB grid for values and ADJ fields...', 'info');
     const currentBunkerCheck = scrapeBunkerSnapshot();
 
-    // --- DIAGNOSTIC DUMP: always show what was scraped so failures are visible ---
+    // Diagnostic dump
     if (currentBunkerCheck.length === 0) {
         setStatus('🔍 DEBUG Bunker Scrape: 0 rows found — locateBunkerRows() returned empty.', 'warning');
     } else {
         currentBunkerCheck.forEach((r, i) => {
-            setStatus(`🔍 DEBUG Row[${i}] "${r.displayLabel}": lastRob=${r.lastRob === null ? 'NULL (not scraped)' : r.lastRob}  robStart=${r.robStart === null ? 'NULL (not scraped)' : r.robStart}  adj=${r.adj}  lastRobInput=${r.lastRobInput ? 'FOUND' : 'MISSING'}  robStartInput=${r.robStartInput ? 'FOUND' : 'MISSING'}`, 'info');
+            setStatus(
+                `🔍 DEBUG Row[${i}] "${r.displayLabel}": ` +
+                `lastRob=${r.lastRob === null ? 'NULL' : r.lastRob}  ` +
+                `robStart=${r.robStart === null ? 'NULL' : r.robStart}  ` +
+                `adj=${r.adj}  ` +
+                `lastRobInput=${r.lastRobInput ? 'FOUND' : 'MISSING'}  ` +
+                `robStartInput=${r.robStartInput ? 'FOUND' : 'MISSING'}`,
+                'info'
+            );
         });
     }
 
-    // HARD BLOCK: if bunker data required but container not found, do not approve.
     if (currentBunkerCheck.length === 0) {
         if (CONFIG.REQUIRE_BUNKER_DATA) {
             setStatus('🛑 LOCKOUT: Bunker ROB grid not found on this report page. REQUIRE_BUNKER_DATA = true — cannot approve without verifying ROB values.', 'error');
@@ -1371,67 +1094,96 @@ async function validateCurrentReport() {
     if (currentBunkerCheck.length > 0) {
 
         // ===================================================================
-        // [FIX v6.0.0-A/B] WITHIN-REPORT ROB INTEGRITY CHECK
-        // This check runs IMMEDIATELY on the freshly-scraped current snapshot,
-        // before any sidebar-card detection or cross-report navigation.
-        // It can therefore NEVER be skipped by a failed card-identification
-        // step. Rule: Last ROB + ADJ must equal ROB Start on THIS report.
-        // When ADJ = 0 this reduces to: Last ROB must equal ROB Start.
+        // WITHIN-REPORT ROB INTEGRITY CHECK  [v6.0.4]
+        //
+        // Three distinct cases for a (lastRob, robStart) pair:
+        //
+        //   A+B) Both null (regardless of whether DOM inputs exist)
+        //        → No values entered for this fuel grade — skip silently.
+        //
+        //   C) Exactly one side is null (partial data)
+        //      → Column detection failed for one column. Block approval.
+        //
+        //   D) Both values present — enforce two independent rules:
+        //      Rule 1: Last ROB must equal ROB Start exactly.
+        //      Rule 2: ADJ must always be 0.
         // ===================================================================
         let withinReportFailed = false;
-        setStatus('Verifying within-report ROB integrity (Last ROB + ADJ = ROB Start)...', 'info');
+        setStatus('Verifying within-report ROB integrity (Last ROB = ROB Start, ADJ = 0)...', 'info');
 
         currentBunkerCheck.forEach(curr => {
-            // HARD FAIL if scraping didn't resolve both columns — silently
-            // skipping these rows was the root cause of approvals going through.
+            // Determine whether the row has any visible inputs at all.
+            // If neither lastRobInput nor robStartInput was found, this fuel
+            // grade simply has no editable cells — the vessel doesn't carry it.
+            const noInputsFound = !curr.lastRobInput && !curr.robStartInput;
+
+            // ---- CASE A & B: both values null ----
+            // Whether or not input elements are present in the DOM, if both
+            // Last ROB and ROB Start are empty/unpopulated the fuel grade has
+            // no data entered — treat as not applicable and skip silently.
+            if (curr.lastRob === null && curr.robStart === null) {
+                setStatus(`ℹ️ ROB Check [${curr.displayLabel}]: No values entered — skipping.`, 'info');
+                return; // handled — move to next row
+            }
+
+            // ---- CASE C: partial null (exactly one side missing) ----
             if (curr.lastRob === null || curr.robStart === null) {
-                const nullMsg = `[${curr.displayLabel}] Could not extract Last ROB${curr.lastRob === null ? ' (NULL)' : ''} or ROB Start${curr.robStart === null ? ' (NULL)' : ''} — column detection failed. Cannot validate ROB continuity for this row.`;
+                const nullMsg =
+                    `[${curr.displayLabel}] Could not extract ` +
+                    `${curr.lastRob  === null ? 'Last ROB (NULL)' : `Last ROB (${curr.lastRob})`} / ` +
+                    `${curr.robStart === null ? 'ROB Start (NULL)' : `ROB Start (${curr.robStart})`} ` +
+                    `— column detection failed. Cannot validate ROB continuity for this row.`;
                 errors.push(nullMsg);
-                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Last ROB=${curr.lastRob} ROB Start=${curr.robStart} — unable to verify. Blocking approval.`, 'error');
+                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Partial data — Last ROB=${curr.lastRob} ROB Start=${curr.robStart}. Blocking approval.`, 'error');
                 isValid = false;
                 withinReportFailed = true;
                 return;
             }
 
-            const computedRobStart = Math.round((curr.lastRob + curr.adj) * 1000) / 1000;
-            const mismatch = Math.abs(computedRobStart - curr.robStart) > CONFIG.ADJ_TOLERANCE;
+            // ---- CASE D: both values present — run the two required checks ----
+            //   Rule 1: Last ROB must equal ROB Start exactly (within tolerance).
+            //   Rule 2: ADJ must always be 0.
+            let rowFailed = false;
 
-            if (mismatch) {
-                const errMsg = curr.adj === 0
-                    ? `[${curr.displayLabel}] ADJ = 0 but Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}). Values must be identical when no adjustment is applied.`
-                    : `[${curr.displayLabel}] Last ROB (${curr.lastRob}) + ADJ (${curr.adj}) = ${computedRobStart} but ROB Start is (${curr.robStart}). Difference exceeds tolerance.`;
+            // Rule 1 — Last ROB == ROB Start
+            const robMismatch = Math.abs(curr.lastRob - curr.robStart) > CONFIG.ADJ_TOLERANCE;
+            if (robMismatch) {
+                const errMsg = `[${curr.displayLabel}] Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}). They must be identical.`;
                 errors.push(errMsg);
-
                 if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = 'border: 3px solid red !important; background-color: #ffebee !important;';
                 if (curr.robStartInput) curr.robStartInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                if (curr.adj !== 0 && curr.adjElementToHighlight) {
-                    curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                }
-
-                const statusMsg = curr.adj === 0
-                    ? `❌ ROB Mismatch [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}) — ADJ = 0 so values must match exactly.`
-                    : `❌ ROB Mismatch [${curr.displayLabel}]: Last ROB ${curr.lastRob} + ADJ ${curr.adj} = ${computedRobStart} ≠ ROB Start ${curr.robStart}.`;
-                setStatus(statusMsg, 'error');
-
+                setStatus(`❌ ROB Mismatch [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}) — values must be identical.`, 'error');
                 isValid = false;
                 withinReportFailed = true;
-            } else {
+                rowFailed = true;
+            }
+
+            // Rule 2 — ADJ must be 0
+            if (Math.abs(curr.adj) > CONFIG.ADJ_TOLERANCE) {
+                const errMsg = `[${curr.displayLabel}] ADJ is ${curr.adj} — ADJ must always be 0.`;
+                errors.push(errMsg);
+                if (curr.adjElementToHighlight) {
+                    curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
+                }
+                setStatus(`❌ ADJ Non-Zero [${curr.displayLabel}]: ADJ = ${curr.adj} — ADJ must always be 0.`, 'error');
+                isValid = false;
+                withinReportFailed = true;
+                rowFailed = true;
+            }
+
+            if (!rowFailed) {
                 if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
                 if (curr.robStartInput) curr.robStartInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-
-                const okMsg = curr.adj === 0
-                    ? `✅ ROB Match [${curr.displayLabel}]: Last ROB = ROB Start = ${curr.lastRob} (ADJ = 0 — exact match confirmed).`
-                    : `✅ ROB Match [${curr.displayLabel}]: Last ROB ${curr.lastRob} + ADJ ${curr.adj} = ${computedRobStart} = ROB Start ${curr.robStart} ✓`;
-                setStatus(okMsg, 'success');
+                setStatus(`✅ ROB Match [${curr.displayLabel}]: Last ROB = ROB Start = ${curr.lastRob}, ADJ = 0 ✓`, 'success');
             }
         });
 
         if (withinReportFailed) {
             setStatus('🛑 Within-Report ROB Integrity FAILED — halting. Cross-report ADJ check skipped until ROB values are corrected.', 'error');
         } else {
-            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB + ADJ = ROB Start).', 'success');
+            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB = ROB Start, ADJ = 0).', 'success');
 
-        // === CROSS-REPORT ADJ RECONCILIATION (only reached when within-report check passes) ===
+        // === CROSS-REPORT ADJ RECONCILIATION ===
         const sidebarCardsForAdj = getAllReportCards();
         const currentCardForAdj = identifyCurrentCard(sidebarCardsForAdj);
         const currentSigForAdj = currentCardForAdj ? extractCardSignature(currentCardForAdj) : null;
@@ -1441,22 +1193,18 @@ async function validateCurrentReport() {
         } else {
             const { previousCard, futureCard } = findAdjacentVesselReports(currentSigForAdj, sidebarCardsForAdj, currentCardForAdj);
 
-            // [REQUIRED] Without a future report, ADJ values for this report
-            // cannot be reconciled. Stop here — do not approve, do not reject.
             if (!futureCard) {
                 setStatus('🛑 No future report is available for validation. Reporting appears to be complete for this vessel.', 'warning');
                 setStatus('⏸️ ADJ validation could not be completed for this reason — halting without approving the report.', 'warning');
                 return false;
             }
 
-            // Pull the next chronological report's opening Bunker ROB figures.
             setStatus('Cross-referencing ADJ figures against the next report in the timeline...', 'info');
             futureCard.click();
             await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
             await waitForDOMStable();
             const futureBunkerSnapshot = scrapeBunkerSnapshot();
 
-            // Optionally pull the previous chronological report's figures too.
             let previousBunkerSnapshot = [];
             if (previousCard) {
                 setStatus('Cross-referencing ADJ figures against the preceding report in the timeline...', 'info');
@@ -1466,29 +1214,33 @@ async function validateCurrentReport() {
                 previousBunkerSnapshot = scrapeBunkerSnapshot();
             }
 
-            // Return to the current report before continuing.
             currentCardForAdj.click();
             await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
             await waitForDOMStable();
 
-            // Re-scrape: earlier element references are stale after the
-            // form was re-rendered while navigating away and back.
+            // Re-scrape after navigation — earlier element references are stale.
             const freshCurrentSnapshot = scrapeBunkerSnapshot();
 
             let validationFailTriggered = false;
 
             freshCurrentSnapshot.forEach(curr => {
-                // Match by normalised label first; fall back to row position
-                // if no label match is found (handles cosmetic render diffs
-                // the normaliser didn't catch). This prevents a join miss
-                // from silently skipping the ADJ check.
+                // [FIX v6.0.3] Guard against uncarried fuel rows in the
+                // cross-report loop too. If the current row had no inputs and
+                // no values, it's not carried — skip without touching the ADJ
+                // non-zero check below (which would otherwise falsely fire
+                // if adj defaults to 0 but the row has stale state).
+                const noInputsCross = !curr.lastRobInput && !curr.robStartInput;
+                if (curr.lastRob === null && curr.robStart === null && noInputsCross) {
+                    setStatus(`ℹ️ Cross-Report ADJ [${curr.displayLabel}]: No inputs — fuel not carried, skipping.`, 'info');
+                    return;
+                }
+
                 const future = futureBunkerSnapshot.find(f => f.fuelTypeLabel === curr.fuelTypeLabel)
                             || futureBunkerSnapshot[curr.rowIndex];
                 const prev = previousBunkerSnapshot.find(p => p.fuelTypeLabel === curr.fuelTypeLabel)
                             || previousBunkerSnapshot[curr.rowIndex];
 
-                // Check A — Opening balance continuity: this report's "Last ROB"
-                // should pick up from the previous report's "ROB Start".
+                // Check A — Opening balance continuity
                 if (prev && prev.robStart !== null && curr.lastRob !== null) {
                     if (Math.abs(curr.lastRob - prev.robStart) > CONFIG.ADJ_TOLERANCE) {
                         errors.push(`[${curr.displayLabel}] Last ROB (${curr.lastRob}) does not continue from the previous report's ROB Start (${prev.robStart}).`);
@@ -1503,10 +1255,7 @@ async function validateCurrentReport() {
                     }
                 }
 
-                // Check B — ADJ reconciliation: this report's adjusted closing
-                // balance (ROB Start + ADJ) should flow into the next report's
-                // "Last ROB". This is the real test of whether the ADJ value
-                // entered on this report is correct.
+                // Check B — ADJ reconciliation against next report's Last ROB
                 if (future && future.lastRob !== null && curr.robStart !== null) {
                     const expectedFutureLastRob = curr.robStart + curr.adj;
                     if (Math.abs(future.lastRob - expectedFutureLastRob) > CONFIG.ADJ_TOLERANCE) {
@@ -1521,11 +1270,9 @@ async function validateCurrentReport() {
                         curr.adjElementToHighlight.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
                     }
                 } else if (curr.adj !== 0) {
-                    // ADJ is non-zero but there's no usable future row to check
-                    // it against (missing match, or future row has no Last ROB
-                    // value entered). A non-zero ADJ can NEVER be silently
-                    // waved through — treat this as a validation failure
-                    // rather than skipping the check.
+                    // ADJ is non-zero but no matching future row to verify against —
+                    // [FIX v6.0.3] Only block if this row actually has data (not the
+                    // "no inputs, fuel not carried" case which is already guarded above).
                     errors.push(`[${curr.displayLabel}] ADJ is non-zero (${curr.adj}) but could not be reconciled against the next report — no matching fuel-type row or Last ROB value was found there.`);
                     if (curr.adjElementToHighlight) {
                         curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
@@ -1544,7 +1291,7 @@ async function validateCurrentReport() {
                 setStatus('✅ Bunker ROB Grid: ADJ values reconcile correctly against the previous and next reports.', 'success');
             }
         }
-        } // end else (!withinReportFailed) — cross-report ADJ block
+        } // end else (!withinReportFailed)
     } // end if (currentBunkerCheck.length > 0)
 
     // 5. GEOFORMS TIMELINE & COMPLIANCE SCENARIOS BRIDGE
@@ -1642,10 +1389,6 @@ async function approveReport() {
 
     yesBtn.click();
     
-    // --- OVERRIDE INTERCEPTOR FOR ZERO DISTANCE WARNINGS ---
-    // Only fires when the "Proceed Anyway" modal button is actually present on
-    // screen — prevents false positives from the word "observed distance"
-    // appearing elsewhere in the form body.
     setStatus('Evaluating modal chain for trailing warnings...', 'info');
     await sleep(800);
 
@@ -1656,7 +1399,6 @@ async function approveReport() {
     });
 
     if (proceedAnyway) {
-        // A "Proceed Anyway" modal is open — check context before clicking
         const contextData = extractReportContext();
         if (contextData.reportType === 'In Port Report') {
             setStatus('⚠️ Distance 0 warning caught in Port Context. Bypassing safely...', 'warning');
@@ -1668,7 +1410,6 @@ async function approveReport() {
             return false;
         }
     }
-    // --- END INTERCEPTOR ---
 
     setStatus('✅ Report successfully validated, signed off, and approved in system.', 'success');
     await sleep(CONFIG.DOM_STABLE_HEADSTART_MS);
@@ -1677,11 +1418,7 @@ async function approveReport() {
 }
 
 // ---------------------------------------------------------------------------
-//   REPORT REJECTION (DUPLICATE HANDLING)  [NEW v5.8-D]
-// ---------------------------------------------------------------------------
-// On a confirmed duplicate, click "Reject", then fill the rejection-reason
-// field INSIDE the resulting confirmation dialog ONLY — this never touches
-// the report form's own "Remarks" field. Finally, confirm the rejection.
+//   REPORT REJECTION (DUPLICATE HANDLING)
 // ---------------------------------------------------------------------------
 
 async function rejectReportAsDuplicate(rejectionMessage) {
@@ -1707,9 +1444,6 @@ async function rejectReportAsDuplicate(rejectionMessage) {
     rejectBtn.click();
     await sleep(CONFIG.SLEEP_POST_CLICK_MS);
 
-    // Scope the reason/comment field lookup to an OPEN DIALOG ONLY.
-    // This deliberately does NOT fall back to a document-wide search, so the
-    // report form's own "Remarks" field can never be matched/modified.
     const dialog = findOpenDialog();
 
     if (dialog) {
@@ -1734,8 +1468,6 @@ async function rejectReportAsDuplicate(rejectionMessage) {
         setStatus('⚠️ No confirmation dialog detected after clicking Reject — proceeding without a reason field. (Remarks field intentionally left untouched.)', 'warning');
     }
 
-    // Locate confirmation button — prefer one scoped to the dialog, fall back
-    // to the standard PrimeFaces confirm-accept selector.
     let confirmBtn = null;
     if (dialog) {
         confirmBtn = Array.from(dialog.querySelectorAll('button, .p-button, [role="button"]')).find(el => {
@@ -1783,8 +1515,6 @@ async function goToNextPendingReport() {
         return false;
     }
 
-    // A card is "pending" (unapproved) when it has a white/transparent background.
-    // Approved cards have a coloured (green/teal) background set inline by the app.
     const isPending = card => {
         const bgColor = window.getComputedStyle(card).backgroundColor;
         return (
@@ -1794,28 +1524,17 @@ async function goToNextPendingReport() {
         );
     };
 
-    // The active card is the one currently selected — it typically has a
-    // non-white background (green/teal highlight). Find it by exclusion:
-    // it is NOT pending, or it carries an active/highlight class.
     const isActive = card =>
         card.classList.contains('active') ||
         card.classList.contains('p-highlight') ||
         card.classList.contains('selected') ||
-        !isPending(card);  // coloured bg = currently viewed card
+        !isPending(card);
 
     const currentIndex = sidebarCards.findIndex(isActive);
 
-    // [FIX v5.7-B] CHRONOLOGICAL NAVIGATION
-    // The sidebar renders reports in REVERSE chronological order:
-    //   index 0 = newest report (top),  last index = oldest report (bottom)
-    // Autopilot processes oldest-first, so "next" is always one step UPWARD
-    // (lower index = more recent date). The previous code searched downward
-    // (higher index = older) and its wrap-around returned to index 0 — the
-    // newest pending report — instead of the chronologically immediate next one.
     const searchFrom = currentIndex >= 0 ? currentIndex - 1 : sidebarCards.length - 1;
     let nextPendingCard = null;
 
-    // Search upward (toward newer reports / lower indices)
     for (let i = searchFrom; i >= 0; i--) {
         if (isPending(sidebarCards[i])) {
             nextPendingCard = sidebarCards[i];
@@ -1823,7 +1542,6 @@ async function goToNextPendingReport() {
         }
     }
 
-    // Fallback: nothing above — wrap from the bottom (oldest unapproved entry)
     if (!nextPendingCard) {
         for (let i = sidebarCards.length - 1; i > searchFrom; i--) {
             if (isPending(sidebarCards[i])) {
@@ -1850,8 +1568,6 @@ async function goToNextPendingReport() {
 // ---------------------------------------------------------------------------
 
 function isCurrentReportAlreadyApproved() {
-    // Check for the "Approved" badge / Re Ingest / Open for Resubmit buttons
-    // that the app renders once a report has been approved.
     let screenText = '';
     getAllContexts().forEach(ctx => {
         if (ctx && ctx.body) screenText += ctx.body.innerText || '';
@@ -1867,8 +1583,6 @@ function isCurrentReportAlreadyApproved() {
 
 async function runAutopilot() {
     try {
-        // If the user clicked Start while sitting on an already-approved report,
-        // navigate to the next unapproved one first without touching this report.
         if (isCurrentReportAlreadyApproved()) {
             setStatus('⚠️ Current report already approved. Jumping to next unapproved...', 'warning');
             const hasNext = await goToNextPendingReport();
@@ -1929,7 +1643,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v6.0.0)';
+    btn.innerText = '▶ Start Autopilot (v6.0.3)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -1969,7 +1683,7 @@ function setStatus(message, type = 'info') {
 function clearStatus() {
     const box = document.getElementById('autopilot-status');
     if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.0.0):</div>";
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.0.3):</div>";
     }
 }
 
@@ -1980,7 +1694,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v6.0.0)';
+        btn.innerText = '▶ Start Autopilot (v6.0.3)';
         btn.style.backgroundColor = '#2e7d32';
     }
 }
@@ -1989,7 +1703,6 @@ injectControlPanel();
 
 // ===========================================================================
 //   Geoforms Timeline & Events Validation Engine
-//   Handles Core IMO-DCS / MRV Carbon Footprint Compliance Rules
 // ===========================================================================
 
 class GeoformsTimelineValidator {
@@ -2060,8 +1773,6 @@ class GeoformsTimelineValidator {
     }
 
     applyAutomations(reportContext, eventRows) {
-        // [FIX v5.7-A] Skip sea automations for departure reports — the period
-        // includes a port phase, so zeroing steaming hours would be incorrect.
         if (reportContext.reportType === 'At Sea NOON Report' && !reportContext.isDepartureReport) {
             const hasDriftingOrStoppage = eventRows.some(
                 row =>
@@ -2077,10 +1788,6 @@ class GeoformsTimelineValidator {
 
     validateWhitelists(reportContext, row, result) {
         if (reportContext.reportType === 'At Sea NOON Report') {
-            // [FIX v5.7-A] DEPARTURE REPORT EXCEPTION
-            // When the vessel departed during this period, the Events table legitimately
-            // contains port-phase events before the SOSP, followed by sea-phase events.
-            // Accept either whitelist; unknown event types still fail.
             if (reportContext.isDepartureReport) {
                 const matchSea  = this.SEA_EVENTS_WHITELIST.some(
                     e => e.toLowerCase() === row.eventType.toLowerCase()
@@ -2094,7 +1801,6 @@ class GeoformsTimelineValidator {
                     );
                 }
             } else {
-                // Pure At Sea NOON — only sea events allowed
                 const match = this.SEA_EVENTS_WHITELIST.some(
                     e => e.toLowerCase() === row.eventType.toLowerCase()
                 );
@@ -2173,7 +1879,6 @@ class GeoformsTimelineValidator {
     }
 
     checkScenario08_AtSeaNoon(reportContext, row, result) {
-        // [FIX v5.7-A] Skip for departure reports — steaming hours span a mixed period.
         if (reportContext.reportType === 'At Sea NOON Report' && !reportContext.isDepartureReport) {
             if (
                 row.eventType.toLowerCase() === 'drifting' ||
@@ -2246,3 +1951,5 @@ class GeoformsTimelineValidator {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = GeoformsTimelineValidator;
 }
+
+})();
