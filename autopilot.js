@@ -1,4 +1,3 @@
-
 // =========================================================================
 //   MARITIME REPORT AUTOPILOT — v6.0.0 (ROB Integrity & ADJ Enforcement)
 //   Fixes & Upgrades applied:
@@ -1383,12 +1382,33 @@ async function validateCurrentReport() {
         setStatus('Verifying within-report ROB integrity (Last ROB + ADJ = ROB Start)...', 'info');
 
         currentBunkerCheck.forEach(curr => {
-            // HARD FAIL if scraping didn't resolve both columns — silently
-            // skipping these rows was the root cause of approvals going through.
-            if (curr.lastRob === null || curr.robStart === null) {
-                const nullMsg = `[${curr.displayLabel}] Could not extract Last ROB${curr.lastRob === null ? ' (NULL)' : ''} or ROB Start${curr.robStart === null ? ' (NULL)' : ''} — column detection failed. Cannot validate ROB continuity for this row.`;
+            // TRUE SCRAPE FAILURE: the input element itself wasn't found in the
+            // DOM (column detection failed). This is the only case that should
+            // block approval — we genuinely don't know what's in the cell.
+            if (!curr.lastRobInput || !curr.robStartInput) {
+                const nullMsg = `[${curr.displayLabel}] Could not locate Last ROB${!curr.lastRobInput ? ' (input missing)' : ''} or ROB Start${!curr.robStartInput ? ' (input missing)' : ''} field in the DOM — column detection failed. Cannot validate ROB continuity for this row.`;
                 errors.push(nullMsg);
-                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Last ROB=${curr.lastRob} ROB Start=${curr.robStart} — unable to verify. Blocking approval.`, 'error');
+                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Last ROB input ${curr.lastRobInput ? 'found' : 'MISSING'}, ROB Start input ${curr.robStartInput ? 'found' : 'MISSING'} — unable to verify. Blocking approval.`, 'error');
+                isValid = false;
+                withinReportFailed = true;
+                return;
+            }
+
+            // LEGITIMATE N/A ROW: both input elements were found, but both are
+            // blank. This means the fuel type isn't carried on this vessel
+            // (e.g. HSFO, LSIFO, VLSFO<=80cst on a vessel that only runs
+            // LSMGO/VLSFO) — not a scrape failure. Skip validation silently.
+            if (curr.lastRob === null && curr.robStart === null) {
+                setStatus(`ℹ️ [${curr.displayLabel}] Last ROB and ROB Start both blank — fuel type not carried on this vessel, skipping.`, 'info');
+                return;
+            }
+
+            // PARTIAL BLANK: one side has a value, the other doesn't. That's a
+            // real inconsistency worth flagging, not a missing-fuel-type case.
+            if (curr.lastRob === null || curr.robStart === null) {
+                const nullMsg = `[${curr.displayLabel}] Last ROB${curr.lastRob === null ? ' (BLANK)' : ` (${curr.lastRob})`} and ROB Start${curr.robStart === null ? ' (BLANK)' : ` (${curr.robStart})`} disagree — one is blank while the other has a value.`;
+                errors.push(nullMsg);
+                setStatus(`❌ Partial Data [${curr.displayLabel}]: Last ROB=${curr.lastRob} ROB Start=${curr.robStart} — one side blank, one populated. Blocking approval.`, 'error');
                 isValid = false;
                 withinReportFailed = true;
                 return;
@@ -2247,4 +2267,3 @@ class GeoformsTimelineValidator {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = GeoformsTimelineValidator;
 }
-undefined
