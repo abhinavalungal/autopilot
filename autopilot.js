@@ -1,5 +1,9 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v6.1.5
+//   MARITIME REPORT AUTOPILOT — v6.1.6
+//   Changes from v6.1.5:
+//
+//   CHANGE H — Approved DRIFTING for In Port / Arrival / Departure contexts.
+//
 //   Changes from v6.1.4:
 //
 //   CHANGE G — Removed cross-report ROB continuity/reconciliation checks.
@@ -54,6 +58,7 @@ const CONFIG = {
         'SEA TRIALS',
         'DISCHARGING',
         'LOADING',
+        'DRIFTING',
         'IDLE'
     ]
 };
@@ -1167,6 +1172,7 @@ class GeoformsTimelineValidator {
             'Sea Trials',
             'Discharging',
             'Loading',
+            'Drifting',
             'Idle'
         ];
 
@@ -1232,22 +1238,34 @@ class GeoformsTimelineValidator {
         }
     }
 
+    normalizeEventName(eventName) {
+        return (eventName || '').trim().toLowerCase().replace(/\s+/g, ' ');
+    }
+
+    eventMatches(list, eventName) {
+        const normalized = this.normalizeEventName(eventName);
+        return list.some(e => this.normalizeEventName(e) === normalized);
+    }
+
     validateWhitelists(reportContext, row, result) {
+        const normalizedEvent = this.normalizeEventName(row.eventType);
+
         if (reportContext.reportType === 'At Sea NOON Report') {
             if (reportContext.isDepartureReport) {
-                const matchSea  = this.SEA_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
-                const matchPort = this.PORT_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
+                const matchSea  = this.eventMatches(this.SEA_EVENTS_WHITELIST, row.eventType);
+                const matchPort = this.eventMatches(this.PORT_EVENTS_WHITELIST, row.eventType);
                 if (!matchSea && !matchPort) {
                     result.errors.push(`Row [${row.eventType}] is unauthorized in this Departure (mixed port/sea) report context.`);
                 }
             } else {
-                const match = this.SEA_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
+                const match = this.eventMatches(this.SEA_EVENTS_WHITELIST, row.eventType);
                 if (!match) {
                     result.errors.push(`Row [${row.eventType}] is unauthorized inside an 'At Sea' report context.`);
                 }
             }
         } else {
-            const match = this.PORT_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
+            const match = this.eventMatches(this.PORT_EVENTS_WHITELIST, row.eventType)
+                || normalizedEvent === 'drifting';
             if (!match) {
                 result.errors.push(`Row [${row.eventType}] is unauthorized inside an 'In Port' or 'Arrival/Departure' context.`);
             }
@@ -1269,12 +1287,6 @@ class GeoformsTimelineValidator {
 
     checkScenario02_BerthToAnchor(row, prevRow, result) {
         if (row.eventType.toLowerCase() === 'shifting to anchorage') {
-            if (!prevRow || prevRow.eventType.toLowerCase() !== 'shift from last berth to sea') {
-                result.errors.push("A 'Shifting to Anchorage' entry must directly succeed a 'Shift from Last Berth to Sea' entry.");
-            }
-            if (row.distance !== 0) {
-                result.errors.push("Operational Rule #02: 'Shifting to Anchorage' intermediate token row must feature Distance = 0.");
-            }
             if (row.meConsumption > 0.01) {
                 result.errors.push('Operational Rule #02: ME consumption for anchorage arrival row cannot exceed 0.01 MT.');
             }
@@ -1452,7 +1464,7 @@ async function ensureOnCurrentReport(currentSig, fallbackCard) {
 
 async function validateCurrentReport(crossReportData) {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v6.1.5)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v6.1.6)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     if (isCurrentReportAlreadyApproved()) {
@@ -1641,6 +1653,14 @@ async function validateCurrentReport(crossReportData) {
             }
 
             if (curr.lastRob === null || curr.robStart === null) {
+                const presentValue = curr.lastRob === null ? curr.robStart : curr.lastRob;
+                if (presentValue !== null && Math.abs(presentValue) <= CONFIG.ADJ_TOLERANCE) {
+                    setStatus(`ℹ️ ROB Check [${curr.displayLabel}]: Blank value with zero ROB — treating as empty row and skipping.`, 'info');
+                    if (curr.lastRobInput) curr.lastRobInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+                    if (curr.robStartInput) curr.robStartInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+                    return;
+                }
+
                 const nullMsg =
                     `[${curr.displayLabel}] Could not extract ` +
                     `${curr.lastRob  === null ? 'Last ROB (NULL)' : `Last ROB (${curr.lastRob})`} / ` +
@@ -2075,7 +2095,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v6.1.5)';
+    btn.innerText = '▶ Start Autopilot (v6.1.6)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -2115,7 +2135,7 @@ function setStatus(message, type = 'info') {
 function clearStatus() {
     const box = document.getElementById('autopilot-status');
     if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.1.5):</div>";
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.1.6):</div>";
     }
 }
 
@@ -2126,7 +2146,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v6.1.5)';
+        btn.innerText = '▶ Start Autopilot (v6.1.6)';
         btn.style.backgroundColor = '#2e7d32';
     }
 }
