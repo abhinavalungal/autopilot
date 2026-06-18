@@ -1,16 +1,21 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v6.0.4 (ROB Validation Rule Correction)
-//   Change from v6.0.3:
-//   - Within-report ROB check Case B removed: rows where both Last ROB and
-//     ROB Start are empty/null are now always skipped silently, regardless
-//     of whether input elements exist in the DOM. Only rows with at least
-//     one value populated are validated.
-//   - Case D arithmetic rule replaced: the old "Last ROB + ADJ = ROB Start"
-//     formula is removed. Two independent rules are now enforced instead:
-//       Rule 1 — Last ROB must equal ROB Start (exact match, within tolerance).
-//       Rule 2 — ADJ must always be 0.
-//     Both rules are checked independently so both errors surface if both
-//     conditions fail simultaneously.
+//   MARITIME REPORT AUTOPILOT — v6.1.5
+//   Changes from v6.1.4:
+//
+//   CHANGE G — Removed cross-report ROB continuity/reconciliation checks.
+//     Bunker validation now only checks the current report:
+//       - Last ROB must equal ROB Start
+//
+//   Inherited from v6.1.4:
+//   FIX F — ROB End capture in scrapeBunkerSnapshot().
+//   Inherited from v6.1.3:
+//   FIX C — Validation no longer navigates while running.
+//   FIX D — Approve-popup Yes button retry/waitForDOMStable resilience.
+//   FIX E — ensureOnCurrentReport() guard before approval.
+//   Inherited from v6.1.2:
+//   FIX A — Approve button never clicks (p-confirm-popup-accept /
+//            aria-label="Yes" selectors).
+//   FIX B — ROB End is kept distinct from ROB Start in scrapeBunkerSnapshot.
 // =========================================================================
 
 (function () {
@@ -25,11 +30,14 @@ const CONFIG = {
     STEAMING_HOURS_ELAPSED_TOLERANCE: 0.1,
     SLEEP_POLL_MS: 500,
     SLEEP_POST_CLICK_MS: 1200,
+    SLEEP_POST_DIALOG_MS: 800,
     DOM_STABLE_HEADSTART_MS: 400,
     SLEEP_POST_NAVIGATE_MS: 3500,
     SLEEP_INIT_MS: 500,
     DOM_STABLE_TIMEOUT_MS: 3000,
     DOM_STABLE_DEBOUNCE_MS: 200,
+    YES_BTN_RETRY_COUNT: 3,
+    YES_BTN_RETRY_DELAY_MS: 300,
 
     APPROVED_PORT_EVENTS: [
         'IDLE IN PORT',
@@ -45,11 +53,21 @@ const CONFIG = {
         'DRY DOCK / SHIPYARD PERIOD',
         'SEA TRIALS',
         'DISCHARGING',
+        'LOADING',
         'IDLE'
     ]
 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const FIELD_STYLES = {
+    ERROR_HEX_FULL:     'border: 3px solid #f44336 !important; background-color: #ffebee !important;',
+    ERROR_KEYWORD_FULL:  'border: 3px solid red !important; background-color: #ffebee !important;',
+    SUCCESS_FULL:        'border: 1px solid green !important; background-color: #e8f5e9 !important;',
+    SUCCESS_NOBG:        'border: 1px solid green !important;',
+    ERROR_BORDER_ONLY:   '3px solid #f44336',
+    SUCCESS_BORDER_ONLY: '1px solid green'
+};
 
 window.autopilotRunning = false;
 
@@ -64,7 +82,7 @@ function getAllContexts() {
         try {
             const doc = iframe.contentDocument || iframe.contentWindow.document;
             if (doc) contexts.push(doc);
-        } catch (_) {}
+        } catch { /* cross-origin */ }
     }
     return contexts;
 }
@@ -74,9 +92,53 @@ function queryAllContexts(selector) {
     for (const ctx of getAllContexts()) {
         try {
             if (ctx) elements = elements.concat(Array.from(ctx.querySelectorAll(selector)));
-        } catch (_) {}
+        } catch { /* skip */ }
     }
     return elements;
+}
+
+function getAllVisibleText() {
+    let text = '';
+    for (const ctx of getAllContexts()) {
+        if (ctx && ctx.body) text += ctx.body.innerText || '';
+    }
+    return text;
+}
+
+function getMainContentText() {
+    const mainSelectors = [
+        '.form-viewer', '.report-form', '.p-panel-content',
+        'main', '[role="main"]', '.content-area', '#main-content',
+        '.p-component:not([class*="sidebar"]):not([class*="card-list"])'
+    ];
+    for (const sel of mainSelectors) {
+        const el = document.querySelector(sel);
+        if (el) return el.innerText || '';
+    }
+    return getAllVisibleText();
+}
+
+function scrollToIssueElement(el, message = 'Scrolled to the field that needs review.') {
+    if (!el || typeof el.scrollIntoView !== 'function') return false;
+
+    try {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+
+        const originalOutline = el.style.outline;
+        const originalBoxShadow = el.style.boxShadow;
+        el.style.outline = '4px solid #ff9800';
+        el.style.boxShadow = '0 0 0 4px rgba(255, 152, 0, 0.25)';
+
+        setTimeout(() => {
+            el.style.outline = originalOutline;
+            el.style.boxShadow = originalBoxShadow;
+        }, 3500);
+
+        setStatus(`📍 ${message}`, 'warning');
+        return true;
+    } catch {
+        return false;
+    }
 }
 
 function waitForDOMStable(
@@ -105,7 +167,7 @@ function waitForDOMStable(
                         attributes: true
                     });
                 }
-            } catch (_) {}
+            } catch { /* skip */ }
         });
 
         debounceTimer = setTimeout(() => {
@@ -423,12 +485,12 @@ function extractReportContext() {
     const seaSteamingHours = steamingInput ? (parseFloat(steamingInput.value) || 0) : 24;
 
     let cargoBefore = 0, cargoAfter = 0, isSTS = false, stsToggle = 'No';
-    
+
     const inputs = queryAllContexts('input, select, text');
     inputs.forEach(inp => {
         const id = (inp.id || '').toLowerCase();
         const name = (inp.name || '').toLowerCase();
-        
+
         if (id.includes('cargobefore') || name.includes('cargo_before')) cargoBefore = parseFloat(inp.value) || 0;
         if (id.includes('cargoafter') || name.includes('cargo_after')) cargoAfter = parseFloat(inp.value) || 0;
         if (id.includes('stszone') || name.includes('sts_zone')) isSTS = true;
@@ -436,9 +498,9 @@ function extractReportContext() {
     });
 
     return {
-        reportType: reportType,
-        isDepartureReport: isDepartureReport,
-        seaSteamingHours: seaSteamingHours,
+        reportType,
+        isDepartureReport,
+        seaSteamingHours,
         cargoQuantityBeforeTransit: cargoBefore,
         cargoQuantityAfterTransit: cargoAfter,
         isSTSOperationZone: isSTS,
@@ -448,7 +510,7 @@ function extractReportContext() {
 
 function scrapeTimelineEventRows() {
     const scrapedRows = [];
-    
+
     for (const ctx of getAllContexts()) {
         if (!ctx) continue;
 
@@ -490,7 +552,7 @@ function scrapeTimelineEventRows() {
             scrapedRows.push({
                 eventType: selectedText,
                 durationMinutes: duration,
-                distance: distance,
+                distance,
                 meConsumption: fuel,
                 isIntermediateTransitionRow: isIntermediate
             });
@@ -552,10 +614,9 @@ function validatePortEvents() {
             if (!isApproved) {
                 containsInvalidEvent = true;
                 invalidEventName = selectedText;
-                selectEl.style.cssText =
-                    'border: 3px solid #f44336 !important; background-color: #ffebee !important;';
+                selectEl.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
             } else {
-                selectEl.style.cssText = 'border: 1px solid green !important;';
+                selectEl.style.cssText = FIELD_STYLES.SUCCESS_NOBG;
             }
         }
     }
@@ -572,7 +633,20 @@ function validatePortEvents() {
 function locateTrueBunkerContainer() {
     function isBunkerRobHeader(text) {
         const t = text.trim().toUpperCase().replace(/[.\s]+/g, ' ');
-        return (t.includes('BUNKER') && t.includes('ROB')) || t === 'BUNKER';
+        return (t.includes('BUNKER') && t.includes('ROB')) || t.includes('BUNKERS ROB') || t === 'BUNKER';
+    }
+
+    function isVisibleElement(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function hasBunkerRobColumns(el) {
+        const text = (el.innerText || el.textContent || '').toUpperCase().replace(/\s+/g, ' ');
+        return text.includes('LAST ROB') && text.includes('ROB START');
     }
 
     for (const ctx of getAllContexts()) {
@@ -606,6 +680,31 @@ function locateTrueBunkerContainer() {
             current = current.parentElement;
         }
     }
+
+    for (const ctx of getAllContexts()) {
+        if (!ctx) continue;
+
+        const tables = Array.from(ctx.querySelectorAll('table, .p-datatable-table, [role="table"], [role="grid"]'));
+        for (const table of tables) {
+            if (isVisibleElement(table) && hasBunkerRobColumns(table)) {
+                return table;
+            }
+        }
+
+        const inputs = Array.from(ctx.querySelectorAll('input')).filter(inp => {
+            if (inp.type === 'hidden' || !isVisibleElement(inp)) return false;
+            const row = inp.closest('tr, [role="row"], .p-datatable-row');
+            return row && (row.innerText || '').trim();
+        });
+
+        for (const inp of inputs) {
+            const container = inp.closest('table, .p-datatable, [role="table"], [role="grid"], fieldset, section, .card, .p-panel, div');
+            if (container && isVisibleElement(container) && hasBunkerRobColumns(container)) {
+                return container;
+            }
+        }
+    }
+
     return null;
 }
 
@@ -633,7 +732,7 @@ function locateBunkerRows() {
             return false;
         }
         const inputs = Array.from(row.querySelectorAll('input')).filter(inp => {
-            if (inp.type === 'hidden' || inp.disabled) return false;
+            if (inp.type === 'hidden') return false;
             const style = window.getComputedStyle(inp);
             return style.display !== 'none' && style.visibility !== 'hidden';
         });
@@ -643,7 +742,7 @@ function locateBunkerRows() {
 }
 
 // ---------------------------------------------------------------------------
-//   VESSEL TIMELINE & CROSS-REPORT ADJ HELPERS
+//   VESSEL TIMELINE HELPERS
 // ---------------------------------------------------------------------------
 
 function getAllReportCards() {
@@ -735,6 +834,18 @@ function findAdjacentVesselReports(currentSig, sidebarCards, currentCard) {
     return { previousCard, futureCard };
 }
 
+function findOneReportBackCard(currentSig, sidebarCards, currentCard) {
+    const { previousCard } = findAdjacentVesselReports(currentSig, sidebarCards, currentCard);
+    if (previousCard) return previousCard;
+
+    const currentIndex = sidebarCards.indexOf(currentCard);
+    if (currentIndex >= 0 && currentIndex + 1 < sidebarCards.length) {
+        return sidebarCards[currentIndex + 1];
+    }
+
+    return null;
+}
+
 function findNearestCheckedCard(currentSig, sidebarCards, currentCard) {
     const currentTs = reportTimestamp(currentSig);
     if (isNaN(currentTs)) return null;
@@ -763,7 +874,8 @@ function findNearestCheckedCard(currentSig, sidebarCards, currentCard) {
 }
 
 // ---------------------------------------------------------------------------
-//   BUNKER SNAPSHOT SCRAPER
+//   BUNKER SNAPSHOT SCRAPER  (captures ROB End in addition to
+//   Last ROB / ROB Start / ADJ. PASS 2d positional fix retained from v6.1.2.)
 // ---------------------------------------------------------------------------
 
 function scrapeBunkerSnapshot() {
@@ -773,10 +885,12 @@ function scrapeBunkerSnapshot() {
 
     const LAST_ROB_KEYS  = ['last rob', 'prev rob', 'previous rob', 'rob (previous)', 'rob prev'];
     const ROB_START_KEYS = ['rob start', 'start rob', 'opening rob', 'rob (start)', 'rob(start)'];
+    const ROB_END_KEYS   = ['rob end', 'end rob', 'closing rob', 'rob (end)', 'rob(end)', 'rob end balance'];
     const ADJ_KEYS       = ['adj', 'adjustment'];
 
     let lastRobCol  = -1;
     let robStartCol = -1;
+    let robEndCol   = -1;
     let adjCol      = -1;
 
     if (bunkerContainer) {
@@ -786,14 +900,22 @@ function scrapeBunkerSnapshot() {
                 const txt = (th.innerText || '').toLowerCase().replace(/\s+/g, ' ').trim();
                 if (lastRobCol  < 0 && LAST_ROB_KEYS.some(k  => txt.includes(k)))  lastRobCol  = colIdx;
                 if (robStartCol < 0 && ROB_START_KEYS.some(k => txt.includes(k))) robStartCol = colIdx;
-                if (adjCol      < 0 && ADJ_KEYS.some(k      => txt.includes(k)))      adjCol  = colIdx;
+                if (robEndCol   < 0 && ROB_END_KEYS.some(k   => txt.includes(k)))   robEndCol  = colIdx;
+                if (adjCol      < 0 && ADJ_KEYS.some(k        => txt.includes(k)))      adjCol  = colIdx;
             });
         }
     }
 
     function numVal(el) {
         if (!el) return null;
-        const raw = el.tagName === 'INPUT' ? el.value : el.innerText;
+        let raw;
+        if (el.tagName === 'INPUT') {
+            raw = el.value;
+        } else {
+            raw = (el.innerText || el.textContent || '').replace(/,/g, '');
+            const match = raw.match(/-?\d+(?:\.\d+)?/);
+            return match ? parseFloat(match[0]) : null;
+        }
         const cleaned = (raw || '').replace(/,/g, '').trim();
         if (cleaned === '' || cleaned === '-' || cleaned === 'N/A') return null;
         const n = parseFloat(cleaned);
@@ -809,32 +931,34 @@ function scrapeBunkerSnapshot() {
         const fuelTypeLabel = normalisedLabel || `__ROW_${index}`;
         const displayLabel  = rawLabel || `Line ${index + 1}`;
 
-        const allInputs = cells.flatMap(c =>
-            Array.from(c.querySelectorAll('input')).filter(inp => {
-                if (inp.type === 'hidden' || inp.disabled) return false;
-                const s = window.getComputedStyle(inp);
-                return s.display !== 'none' && s.visibility !== 'hidden';
-            })
-        );
-
         let lastRobInput  = null;
         let robStartInput = null;
+        let robEndInput   = null;
         let adjInput      = null;
         let adjStaticVal  = 0;
         let hasAdjColumn  = false;
         let adjElementToHighlight = null;
 
-        // PASS 2a: data-td-name attributes
+        // ---- PASS 2a: data-td-name attributes ----
         cells.forEach(cell => {
             const tdName = (cell.getAttribute('data-td-name') || '').toLowerCase().replace(/[_\-\s]/g, '');
             const inp    = cell.querySelector('input');
 
             const isLastRobByAttr  = ['lastremaining', 'lastrob', 'previousrob', 'prevrob'].includes(tdName);
             const isRobStartByAttr = ['robstart', 'startingrob', 'openrob', 'robopeningbalance'].includes(tdName);
+            const isRobEndByAttr   = ['robend', 'endrob', 'closingrob', 'closingbalance'].includes(tdName);
             const isAdjByAttr      = ['adj', 'adjustment'].includes(tdName);
 
-            if (!lastRobInput  && isLastRobByAttr  && inp) lastRobInput  = inp;
-            if (!robStartInput && isRobStartByAttr && inp) robStartInput = inp;
+            if (isRobEndByAttr) {
+                // Capture ROB End instead of discarding it. It must
+                // never be mistaken FOR Last ROB / ROB Start (that's still
+                // enforced below), but keeping it distinct avoids column mixups.
+                if (!robEndInput) robEndInput = inp || cell;
+                return;
+            }
+
+            if (!lastRobInput  && isLastRobByAttr)  lastRobInput  = inp || cell;
+            if (!robStartInput && isRobStartByAttr) robStartInput = inp || cell;
             if (!hasAdjColumn  && isAdjByAttr) {
                 hasAdjColumn = true;
                 if (inp) { adjInput = inp; adjElementToHighlight = inp; }
@@ -842,10 +966,17 @@ function scrapeBunkerSnapshot() {
             }
         });
 
-        // PASS 2b: header-index map
-        if (!lastRobInput  && lastRobCol  >= 0 && cells[lastRobCol])  lastRobInput  = cells[lastRobCol].querySelector('input')  || null;
-        if (!robStartInput && robStartCol >= 0 && cells[robStartCol]) robStartInput = cells[robStartCol].querySelector('input') || null;
-        if (!hasAdjColumn  && adjCol >= 0 && cells[adjCol]) {
+        // ---- PASS 2b: header-index map ----
+        if (!lastRobInput && lastRobCol >= 0 && cells[lastRobCol]) {
+            lastRobInput = cells[lastRobCol].querySelector('input') || cells[lastRobCol];
+        }
+        if (!robStartInput && robStartCol >= 0 && cells[robStartCol] && robStartCol !== robEndCol) {
+            robStartInput = cells[robStartCol].querySelector('input') || cells[robStartCol];
+        }
+        if (!robEndInput && robEndCol >= 0 && cells[robEndCol]) {
+            robEndInput = cells[robEndCol].querySelector('input') || cells[robEndCol];
+        }
+        if (!hasAdjColumn && adjCol >= 0 && cells[adjCol]) {
             hasAdjColumn = true;
             const adjCell = cells[adjCol];
             const adjInp  = adjCell.querySelector('input');
@@ -858,11 +989,21 @@ function scrapeBunkerSnapshot() {
             }
         }
 
-        // PASS 2c: per-cell text / id / name scan
-        if (!lastRobInput || !robStartInput) {
-            cells.forEach(cell => {
+        // ---- PASS 2c: per-cell text / id / name scan ----
+        if (!lastRobInput || !robStartInput || !robEndInput) {
+            cells.forEach((cell, ci) => {
+                const tdName = (cell.getAttribute('data-td-name') || '').toLowerCase().replace(/[_\-\s]/g, '');
+                const isRobEndAttr = ['robend', 'endrob', 'closingrob', 'closingbalance'].includes(tdName);
+
                 const titleEl  = cell.querySelector('.p-column-title');
                 const cellTxt  = (titleEl ? titleEl.innerText : cell.getAttribute('data-label') || '').toLowerCase().trim();
+                const isRobEndTxt = ROB_END_KEYS.some(k => cellTxt.includes(k));
+
+                if ((robEndCol >= 0 && ci === robEndCol) || isRobEndAttr || isRobEndTxt) {
+                    if (!robEndInput) robEndInput = cell.querySelector('input') || cell;
+                    return;
+                }
+
                 const inp      = cell.querySelector('input');
                 const inpId    = inp ? (inp.id   || '').toLowerCase() : '';
                 const inpName  = inp ? (inp.name || '').toLowerCase() : '';
@@ -873,8 +1014,8 @@ function scrapeBunkerSnapshot() {
                                 || inpId.includes('robstart') || inpName.includes('rob_start');
                 const isAdj      = ADJ_KEYS.some(k => cellTxt.includes(k) || inpId.includes(k) || inpName.includes(k));
 
-                if (!lastRobInput  && isLastRob  && inp) lastRobInput  = inp;
-                if (!robStartInput && isRobStart && inp) robStartInput = inp;
+                if (!lastRobInput  && isLastRob)  lastRobInput  = inp || cell;
+                if (!robStartInput && isRobStart) robStartInput = inp || cell;
                 if (!hasAdjColumn  && isAdj) {
                     hasAdjColumn = true;
                     if (inp) { adjInput = inp; adjElementToHighlight = inp; }
@@ -883,14 +1024,62 @@ function scrapeBunkerSnapshot() {
             });
         }
 
-        // PASS 2d: positional fallback
-        if ((!lastRobInput || !robStartInput) && allInputs.length >= 2) {
-            if (!lastRobInput)  lastRobInput  = allInputs[0];
-            if (!robStartInput) robStartInput = allInputs[1];
-            if (!hasAdjColumn && allInputs[2]) {
+        // ---- PASS 2d: positional fallback (v6.1.2 column-order-preserving fix) ----
+        if (!lastRobInput || !robStartInput) {
+            const ROB_END_ATTR_SET = new Set(['robend', 'endrob', 'closingrob', 'closingbalance']);
+            const candidateInputs = [];
+
+            cells.forEach((cell, ci) => {
+                if (ci === 0) return;
+
+                const tdAttr = (cell.getAttribute('data-td-name') || '').toLowerCase().replace(/[_\-\s]/g, '');
+                const titleEl   = cell.querySelector('.p-column-title');
+                const cellLabel = (titleEl ? titleEl.innerText : cell.getAttribute('data-label') || '').toLowerCase().trim();
+                const isRobEndCell = (robEndCol >= 0 && ci === robEndCol)
+                                   || ROB_END_ATTR_SET.has(tdAttr)
+                                   || ROB_END_KEYS.some(k => cellLabel.includes(k));
+
+                if (isRobEndCell) {
+                    // Capture as ROB End fallback rather than just skipping.
+                    if (!robEndInput) {
+                        const robEndInp = cell.querySelector('input');
+                        robEndInput = robEndInp || cell;
+                    }
+                    return;
+                }
+
+                const inp = Array.from(cell.querySelectorAll('input')).find(i => {
+                    if (i.type === 'hidden') return false;
+                    const s = window.getComputedStyle(i);
+                    return s.display !== 'none' && s.visibility !== 'hidden';
+                });
+
+                if (inp) {
+                    candidateInputs.push(inp);
+                } else {
+                    const titleEl2  = cell.querySelector('.p-column-title');
+                    const rawText   = (cell.innerText || '').replace(/,/g, '').trim();
+                    const valueText = titleEl2
+                        ? rawText.replace((titleEl2.innerText || '').trim(), '').trim()
+                        : rawText;
+                    if (/^-?\d+(?:\.\d+)?$/.test(valueText)) {
+                        candidateInputs.push(cell);
+                    }
+                }
+            });
+
+            if (!lastRobInput  && candidateInputs[0]) lastRobInput  = candidateInputs[0];
+            if (!robStartInput && candidateInputs[1]) robStartInput = candidateInputs[1];
+            if (!hasAdjColumn  && candidateInputs[2]) {
                 hasAdjColumn = true;
-                adjInput = allInputs[2];
-                adjElementToHighlight = allInputs[2];
+                const candidate = candidateInputs[2];
+                if (candidate.tagName === 'INPUT') {
+                    adjInput = candidate;
+                    adjElementToHighlight = candidate;
+                } else {
+                    adjStaticVal = numVal(candidate) || 0;
+                    adjElementToHighlight = candidate;
+                }
             }
         }
 
@@ -903,6 +1092,7 @@ function scrapeBunkerSnapshot() {
 
         const lastRobVal  = numVal(lastRobInput);
         const robStartVal = numVal(robStartInput);
+        const robEndVal   = numVal(robEndInput);
 
         snapshot.push({
             fuelTypeLabel,
@@ -910,11 +1100,13 @@ function scrapeBunkerSnapshot() {
             rowIndex: index,
             lastRobInput,
             robStartInput,
+            robEndInput,
             adjInput,
             adjElementToHighlight,
             hasAdjColumn,
             lastRob:  lastRobVal,
             robStart: robStartVal,
+            robEnd:   robEndVal,
             adj:      finalAdjValue
         });
     });
@@ -939,767 +1131,20 @@ function findOpenDialog() {
     return null;
 }
 
-// ---------------------------------------------------------------------------
-//   CORE VALIDATION RUNNER
-// ---------------------------------------------------------------------------
+function findActionButton(label, { matchVisibleText = false } = {}) {
+    const lowerLabel = label.toLowerCase();
 
-async function validateCurrentReport() {
-    clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v6.0.3)...', 'info');
-    await sleep(CONFIG.SLEEP_INIT_MS);
-
-    let isValid = true;
-    const errors = [];
-
-    // 1. DUPLICATE TIMESTAMP SCAN
-    setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
-    const duplicateMatch = checkIsDuplicateReport();
-    if (duplicateMatch) {
-        const { currentSig, matchedSig } = duplicateMatch;
-
-        setStatus('🛑 LOCKOUT: Duplicate report detected.', 'error');
-        setStatus(`   Current report:  ${describeSignature(currentSig)}`, 'error');
-        setStatus(`   Matches existing report:  ${describeSignature(matchedSig)}`, 'error');
-
-        const rejectionMessage =
-            `Duplicate Report Detected: this report (${describeSignature(currentSig)}) ` +
-            `matches an existing report already on file (${describeSignature(matchedSig)}).`;
-
-        const rejected = await rejectReportAsDuplicate(rejectionMessage);
-        if (rejected) {
-            setStatus('✅ Report rejected automatically with duplicate explanation. Halted for review.', 'warning');
-        } else {
-            setStatus('⚠️ Could not complete automatic rejection — manual review required. Halted.', 'error');
-        }
-        return false;
-    } else {
-        setStatus('✅ Duplicate Scan: No matching duplicate found in the report list.', 'success');
-    }
-
-    // 2. PORT EVENTS BLOCK CHECK
-    setStatus('Analyzing active operational event parameters...', 'info');
-    const eventCheck = validatePortEvents();
-
-    if (eventCheck.status === 'INVALID') {
-        isValid = false;
-        setStatus(`🛑 LOCKOUT: Unapproved event scenario detected [${eventCheck.event}]. Halted.`, 'error');
-        return false;
-    } else if (eventCheck.status === 'VALID_PORT') {
-        setStatus('✅ Operational Scenario: Approved Port Event layout and sequence rules confirmed.', 'success');
-    } else {
-        setStatus("✅ Operational Scenario: Approved At Sea state profile confirmed.", 'success');
-    }
-
-    // 3. STEAMING HOURS VALIDATION
-    const earlyContext = extractReportContext();
-    const steamMin = earlyContext.reportType === 'In Port Report'
-        ? CONFIG.STEAMING_HOURS_IN_PORT_MIN
-        : CONFIG.STEAMING_HOURS_MIN;
-    const steamMax = earlyContext.reportType === 'In Port Report'
-        ? CONFIG.STEAMING_HOURS_IN_PORT_MAX
-        : CONFIG.STEAMING_HOURS_MAX;
-    const steamLabel = earlyContext.reportType === 'In Port Report'
-        ? `${CONFIG.STEAMING_HOURS_IN_PORT_MIN}–${CONFIG.STEAMING_HOURS_IN_PORT_MAX}`
-        : `${CONFIG.STEAMING_HOURS_MIN}–${CONFIG.STEAMING_HOURS_MAX}`;
-
-    const steamingHoursInput = findSteamingHoursInput();
-    if (steamingHoursInput && steamingHoursInput.value.trim() !== '') {
-        const hours = parseFloat(steamingHoursInput.value);
-        if (isNaN(hours) || hours < steamMin || hours > steamMax) {
-            errors.push(`Steaming hours (${hours}) outside bounds [${steamLabel}].`);
-            steamingHoursInput.style.border = '3px solid #f44336';
-            isValid = false;
-            setStatus(`❌ Steaming hrs failed bounds check: ${hours} (allowed: ${steamLabel} for ${earlyContext.reportType})`, 'error');
-        } else {
-            steamingHoursInput.style.border = '1px solid green';
-            setStatus(`✅ Steaming Hours Matrix: Value (${hours} hrs) within safe parameters [${steamLabel}] for ${earlyContext.reportType}.`, 'success');
-        }
-
-        if (earlyContext.reportType === 'At Sea NOON Report') {
-            const sidebarCardsForSteaming = getAllReportCards();
-            const currentCardForSteaming = identifyCurrentCard(sidebarCardsForSteaming);
-            const currentSigForSteaming = currentCardForSteaming ? extractCardSignature(currentCardForSteaming) : null;
-
-            if (!currentCardForSteaming || !currentSigForSteaming || isNaN(reportTimestamp(currentSigForSteaming))) {
-                setStatus('⚠️ Unable to determine this report\'s own timestamp — elapsed-time steaming hours check skipped.', 'warning');
-            } else {
-                const nearestChecked = findNearestCheckedCard(currentSigForSteaming, sidebarCardsForSteaming, currentCardForSteaming);
-
-                if (!nearestChecked) {
-                    setStatus('ℹ️ No already-checked report found for this vessel yet — elapsed-time steaming hours check skipped.', 'info');
-                } else if (isNaN(reportTimestamp(nearestChecked.sig))) {
-                    setStatus('⚠️ Nearest checked report has no usable timestamp — elapsed-time steaming hours check skipped.', 'warning');
-                } else {
-                    const currentTs = reportTimestamp(currentSigForSteaming);
-                    const checkedTs = reportTimestamp(nearestChecked.sig);
-                    const actualElapsedHours = Math.abs(currentTs - checkedTs) / (1000 * 60 * 60);
-                    const diff = Math.abs(actualElapsedHours - hours);
-
-                    const refLabel = `${nearestChecked.sig.date} ${nearestChecked.sig.time} ${nearestChecked.sig.utcOffset || '+00:00'}`;
-                    const currLabel = `${currentSigForSteaming.date} ${currentSigForSteaming.time} ${currentSigForSteaming.utcOffset || '+00:00'}`;
-
-                    if (Math.abs(actualElapsedHours - hours) > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
-                        setStatus(`🔍 DEBUG — current card rawText: "${currentSigForSteaming.rawText.replace(/\n/g, ' | ')}"`, 'warning');
-                        setStatus(`🔍 DEBUG — current parsed: date=${currentSigForSteaming.date} time=${currentSigForSteaming.time} offset=${currentSigForSteaming.utcOffset || '(none)'} epoch=${currentTs}`, 'warning');
-                        setStatus(`🔍 DEBUG — checked card rawText: "${nearestChecked.sig.rawText.replace(/\n/g, ' | ')}"`, 'warning');
-                        setStatus(`🔍 DEBUG — checked parsed: date=${nearestChecked.sig.date} time=${nearestChecked.sig.time} offset=${nearestChecked.sig.utcOffset || '(none)'} epoch=${checkedTs}`, 'warning');
-                    }
-
-                    if (diff > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
-                        errors.push(`Steaming hours (${hours}) does not match actual elapsed time (${actualElapsedHours.toFixed(2)} hrs) between this report (${currLabel}) and the nearest checked report (${refLabel}, ${nearestChecked.direction}).`);
-                        steamingHoursInput.style.cssText = 'border: 3px solid #f44336 !important; background-color: #ffebee !important;';
-                        isValid = false;
-                        setStatus(`❌ Steaming Hours Elapsed-Time Check: Reported ${hours} hrs ≠ actual elapsed ${actualElapsedHours.toFixed(2)} hrs vs ${nearestChecked.direction} checked report (${refLabel}).`, 'error');
-                    } else {
-                        steamingHoursInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                        setStatus(`✅ Steaming Hours Elapsed-Time Check: Reported ${hours} hrs matches actual elapsed ${actualElapsedHours.toFixed(2)} hrs vs ${nearestChecked.direction} checked report (${refLabel}).`, 'success');
-                    }
-                }
-            }
-        }
-    } else {
-        setStatus('ℹ️ Steaming Hours: Field unpopulated or not applicable to this report layout index.', 'info');
-    }
-
-    // 4. ADJ CROSS-REPORT RECONCILIATION (BUNKER ROB GRID)
-    setStatus('Targeting isolated Bunker ROB grid for values and ADJ fields...', 'info');
-    const currentBunkerCheck = scrapeBunkerSnapshot();
-
-    // Diagnostic dump
-    if (currentBunkerCheck.length === 0) {
-        setStatus('🔍 DEBUG Bunker Scrape: 0 rows found — locateBunkerRows() returned empty.', 'warning');
-    } else {
-        currentBunkerCheck.forEach((r, i) => {
-            setStatus(
-                `🔍 DEBUG Row[${i}] "${r.displayLabel}": ` +
-                `lastRob=${r.lastRob === null ? 'NULL' : r.lastRob}  ` +
-                `robStart=${r.robStart === null ? 'NULL' : r.robStart}  ` +
-                `adj=${r.adj}  ` +
-                `lastRobInput=${r.lastRobInput ? 'FOUND' : 'MISSING'}  ` +
-                `robStartInput=${r.robStartInput ? 'FOUND' : 'MISSING'}`,
-                'info'
-            );
-        });
-    }
-
-    if (currentBunkerCheck.length === 0) {
-        if (CONFIG.REQUIRE_BUNKER_DATA) {
-            setStatus('🛑 LOCKOUT: Bunker ROB grid not found on this report page. REQUIRE_BUNKER_DATA = true — cannot approve without verifying ROB values.', 'error');
-            isValid = false;
-        } else {
-            setStatus('ℹ️ Bunker ROB section absent — REQUIRE_BUNKER_DATA is false, skipping.', 'info');
-        }
-    }
-
-    if (currentBunkerCheck.length > 0) {
-
-        // ===================================================================
-        // WITHIN-REPORT ROB INTEGRITY CHECK  [v6.0.4]
-        //
-        // Three distinct cases for a (lastRob, robStart) pair:
-        //
-        //   A+B) Both null (regardless of whether DOM inputs exist)
-        //        → No values entered for this fuel grade — skip silently.
-        //
-        //   C) Exactly one side is null (partial data)
-        //      → Column detection failed for one column. Block approval.
-        //
-        //   D) Both values present — enforce two independent rules:
-        //      Rule 1: Last ROB must equal ROB Start exactly.
-        //      Rule 2: ADJ must always be 0.
-        // ===================================================================
-        let withinReportFailed = false;
-        setStatus('Verifying within-report ROB integrity (Last ROB = ROB Start, ADJ = 0)...', 'info');
-
-        currentBunkerCheck.forEach(curr => {
-            // Determine whether the row has any visible inputs at all.
-            // If neither lastRobInput nor robStartInput was found, this fuel
-            // grade simply has no editable cells — the vessel doesn't carry it.
-            const noInputsFound = !curr.lastRobInput && !curr.robStartInput;
-
-            // ---- CASE A & B: both values null ----
-            // Whether or not input elements are present in the DOM, if both
-            // Last ROB and ROB Start are empty/unpopulated the fuel grade has
-            // no data entered — treat as not applicable and skip silently.
-            if (curr.lastRob === null && curr.robStart === null) {
-                setStatus(`ℹ️ ROB Check [${curr.displayLabel}]: No values entered — skipping.`, 'info');
-                return; // handled — move to next row
-            }
-
-            // ---- CASE C: partial null (exactly one side missing) ----
-            if (curr.lastRob === null || curr.robStart === null) {
-                const nullMsg =
-                    `[${curr.displayLabel}] Could not extract ` +
-                    `${curr.lastRob  === null ? 'Last ROB (NULL)' : `Last ROB (${curr.lastRob})`} / ` +
-                    `${curr.robStart === null ? 'ROB Start (NULL)' : `ROB Start (${curr.robStart})`} ` +
-                    `— column detection failed. Cannot validate ROB continuity for this row.`;
-                errors.push(nullMsg);
-                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Partial data — Last ROB=${curr.lastRob} ROB Start=${curr.robStart}. Blocking approval.`, 'error');
-                isValid = false;
-                withinReportFailed = true;
-                return;
-            }
-
-            // ---- CASE D: both values present — run the two required checks ----
-            //   Rule 1: Last ROB must equal ROB Start exactly (within tolerance).
-            //   Rule 2: ADJ must always be 0.
-            let rowFailed = false;
-
-            // Rule 1 — Last ROB == ROB Start
-            const robMismatch = Math.abs(curr.lastRob - curr.robStart) > CONFIG.ADJ_TOLERANCE;
-            if (robMismatch) {
-                const errMsg = `[${curr.displayLabel}] Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}). They must be identical.`;
-                errors.push(errMsg);
-                if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                if (curr.robStartInput) curr.robStartInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                setStatus(`❌ ROB Mismatch [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}) — values must be identical.`, 'error');
-                isValid = false;
-                withinReportFailed = true;
-                rowFailed = true;
-            }
-
-            // Rule 2 — ADJ must be 0
-            if (Math.abs(curr.adj) > CONFIG.ADJ_TOLERANCE) {
-                const errMsg = `[${curr.displayLabel}] ADJ is ${curr.adj} — ADJ must always be 0.`;
-                errors.push(errMsg);
-                if (curr.adjElementToHighlight) {
-                    curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                }
-                setStatus(`❌ ADJ Non-Zero [${curr.displayLabel}]: ADJ = ${curr.adj} — ADJ must always be 0.`, 'error');
-                isValid = false;
-                withinReportFailed = true;
-                rowFailed = true;
-            }
-
-            if (!rowFailed) {
-                if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                if (curr.robStartInput) curr.robStartInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                setStatus(`✅ ROB Match [${curr.displayLabel}]: Last ROB = ROB Start = ${curr.lastRob}, ADJ = 0 ✓`, 'success');
-            }
-        });
-
-        if (withinReportFailed) {
-            setStatus('🛑 Within-Report ROB Integrity FAILED — halting. Cross-report ADJ check skipped until ROB values are corrected.', 'error');
-        } else {
-            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB = ROB Start, ADJ = 0).', 'success');
-
-        // === CROSS-REPORT ADJ RECONCILIATION ===
-        const sidebarCardsForAdj = getAllReportCards();
-        const currentCardForAdj = identifyCurrentCard(sidebarCardsForAdj);
-        const currentSigForAdj = currentCardForAdj ? extractCardSignature(currentCardForAdj) : null;
-
-        if (!currentCardForAdj || !currentSigForAdj || isNaN(reportTimestamp(currentSigForAdj))) {
-            setStatus('⚠️ Unable to determine this report\'s position in the vessel timeline — ADJ cross-report validation skipped.', 'warning');
-        } else {
-            const { previousCard, futureCard } = findAdjacentVesselReports(currentSigForAdj, sidebarCardsForAdj, currentCardForAdj);
-
-            if (!futureCard) {
-                setStatus('🛑 No future report is available for validation. Reporting appears to be complete for this vessel.', 'warning');
-                setStatus('⏸️ ADJ validation could not be completed for this reason — halting without approving the report.', 'warning');
-                return false;
-            }
-
-            setStatus('Cross-referencing ADJ figures against the next report in the timeline...', 'info');
-            futureCard.click();
-            await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
-            await waitForDOMStable();
-            const futureBunkerSnapshot = scrapeBunkerSnapshot();
-
-            let previousBunkerSnapshot = [];
-            if (previousCard) {
-                setStatus('Cross-referencing ADJ figures against the preceding report in the timeline...', 'info');
-                previousCard.click();
-                await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
-                await waitForDOMStable();
-                previousBunkerSnapshot = scrapeBunkerSnapshot();
-            }
-
-            currentCardForAdj.click();
-            await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
-            await waitForDOMStable();
-
-            // Re-scrape after navigation — earlier element references are stale.
-            const freshCurrentSnapshot = scrapeBunkerSnapshot();
-
-            let validationFailTriggered = false;
-
-            freshCurrentSnapshot.forEach(curr => {
-                // [FIX v6.0.3] Guard against uncarried fuel rows in the
-                // cross-report loop too. If the current row had no inputs and
-                // no values, it's not carried — skip without touching the ADJ
-                // non-zero check below (which would otherwise falsely fire
-                // if adj defaults to 0 but the row has stale state).
-                const noInputsCross = !curr.lastRobInput && !curr.robStartInput;
-                if (curr.lastRob === null && curr.robStart === null && noInputsCross) {
-                    setStatus(`ℹ️ Cross-Report ADJ [${curr.displayLabel}]: No inputs — fuel not carried, skipping.`, 'info');
-                    return;
-                }
-
-                const future = futureBunkerSnapshot.find(f => f.fuelTypeLabel === curr.fuelTypeLabel)
-                            || futureBunkerSnapshot[curr.rowIndex];
-                const prev = previousBunkerSnapshot.find(p => p.fuelTypeLabel === curr.fuelTypeLabel)
-                            || previousBunkerSnapshot[curr.rowIndex];
-
-                // Check A — Opening balance continuity
-                if (prev && prev.robStart !== null && curr.lastRob !== null) {
-                    if (Math.abs(curr.lastRob - prev.robStart) > CONFIG.ADJ_TOLERANCE) {
-                        errors.push(`[${curr.displayLabel}] Last ROB (${curr.lastRob}) does not continue from the previous report's ROB Start (${prev.robStart}).`);
-                        if (curr.lastRobInput) {
-                            curr.lastRobInput.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                        }
-                        isValid = false;
-                        validationFailTriggered = true;
-                        setStatus(`❌ ROB Continuity [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ previous report's ROB Start (${prev.robStart}).`, 'error');
-                    } else if (curr.lastRobInput) {
-                        curr.lastRobInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                    }
-                }
-
-                // Check B — ADJ reconciliation against next report's Last ROB
-                if (future && future.lastRob !== null && curr.robStart !== null) {
-                    const expectedFutureLastRob = curr.robStart + curr.adj;
-                    if (Math.abs(future.lastRob - expectedFutureLastRob) > CONFIG.ADJ_TOLERANCE) {
-                        errors.push(`[${curr.displayLabel}] ADJ value (${curr.adj}) does not reconcile — ROB Start + ADJ (${expectedFutureLastRob}) does not match the next report's Last ROB (${future.lastRob}).`);
-                        if (curr.adjElementToHighlight) {
-                            curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                        }
-                        isValid = false;
-                        validationFailTriggered = true;
-                        setStatus(`❌ ADJ Reconciliation [${curr.displayLabel}]: ROB Start + ADJ (${expectedFutureLastRob}) ≠ next report's Last ROB (${future.lastRob}).`, 'error');
-                    } else if (curr.adjElementToHighlight) {
-                        curr.adjElementToHighlight.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                    }
-                } else if (curr.adj !== 0) {
-                    // ADJ is non-zero but no matching future row to verify against —
-                    // [FIX v6.0.3] Only block if this row actually has data (not the
-                    // "no inputs, fuel not carried" case which is already guarded above).
-                    errors.push(`[${curr.displayLabel}] ADJ is non-zero (${curr.adj}) but could not be reconciled against the next report — no matching fuel-type row or Last ROB value was found there.`);
-                    if (curr.adjElementToHighlight) {
-                        curr.adjElementToHighlight.style.cssText = 'border: 3px solid red !important; background-color: #ffebee !important;';
-                    }
-                    isValid = false;
-                    validationFailTriggered = true;
-                    setStatus(`❌ ADJ Reconciliation [${curr.displayLabel}]: ADJ is non-zero (${curr.adj}) and could not be verified against the next report. Treating as failed.`, 'error');
-                }
-
-                if (curr.robStartInput && !validationFailTriggered) {
-                    curr.robStartInput.style.cssText = 'border: 1px solid green !important; background-color: #e8f5e9 !important;';
-                }
-            });
-
-            if (!validationFailTriggered) {
-                setStatus('✅ Bunker ROB Grid: ADJ values reconcile correctly against the previous and next reports.', 'success');
-            }
-        }
-        } // end else (!withinReportFailed)
-    } // end if (currentBunkerCheck.length > 0)
-
-    // 5. GEOFORMS TIMELINE & COMPLIANCE SCENARIOS BRIDGE
-    setStatus('Linking state parameters with Timeline Engine Matrix...', 'info');
-    const reportContext = extractReportContext();
-    const eventRows = scrapeTimelineEventRows();
-
-    if (eventRows.length > 0) {
-        const timelineValidator = new GeoformsTimelineValidator();
-        const timelineResult = timelineValidator.validateTimeline(reportContext, eventRows);
-
-        if (!timelineResult.isValid) {
-            isValid = false;
-            timelineResult.errors.forEach(err => {
-                errors.push(`[Timeline Matrix] ${err}`);
-                setStatus(`🛑 Regulation Lockout: ${err}`, 'error');
-            });
-        } else {
-            setStatus('✅ Timeline Compliance Matrix: All carbon footprint scenarios and event sequencing rules are fully compliant.', 'success');
-        }
-        timelineResult.warnings.forEach(warn => {
-            setStatus(`⚠️ Timeline Notice: ${warn}`, 'warning');
-        });
-    } else {
-        setStatus('ℹ️ No active event grid objects extracted to check scenario state cascades.', 'info');
-    }
-
-    await sleep(CONFIG.SLEEP_POLL_MS);
-
-    if (!isValid) {
-        setStatus('🛑 LOCKOUT: Validation errors caught. Autopilot halted.', 'error');
-    } else {
-        setStatus('🎉 All system safety checks cleared successfully.', 'success');
-    }
-
-    return isValid;
-}
-
-// ---------------------------------------------------------------------------
-//   REPORT APPROVAL WITH WARNING INTERCEPTOR
-// ---------------------------------------------------------------------------
-
-async function approveReport() {
-    setStatus('Scanning interface for submission buttons...', 'info');
-    let approveBtn = queryAllContexts(
-        'button[label="Approve"], [appconfirmation][label="Approve"], .p-button[label="Approve"]'
+    const exact = queryAllContexts(
+        `button[label="${label}"], [appconfirmation][label="${label}"], .p-button[label="${label}"]`
     )[0];
+    if (exact) return exact;
 
-    if (!approveBtn) {
-        approveBtn = queryAllContexts('button, .p-button, [role="button"]').find(el => {
-            const label = (el.getAttribute('label') || '').toLowerCase();
-            return label === 'approve' || label.includes('approve');
-        });
-    }
-
-    if (!approveBtn) {
-        let textCheck = '';
-        getAllContexts().forEach(ctx => {
-            if (ctx && ctx.body) textCheck += ctx.body.innerText || '';
-        });
-
-        if (
-            textCheck.includes('Approved') &&
-            (textCheck.includes('Re Ingest') || textCheck.includes('Resubmit'))
-        ) {
-            setStatus('⚠️ File is already approved. Proceeding to skip forward...', 'warning');
-            return 'skipped';
-        }
-        setStatus('❌ Submission button context link unreadable.', 'error');
-        return false;
-    }
-
-    approveBtn.click();
-    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
-
-    setStatus('Confirming report verification dialogue...', 'info');
-    let yesBtn = queryAllContexts('.p-confirm-dialog-accept, button[label="Yes"]')[0];
-    if (!yesBtn) {
-        yesBtn = queryAllContexts('button, span, div, .p-button').find(el => {
-            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
-            const label = (el.getAttribute('label') || '').toLowerCase();
-            return (
-                text === 'yes' ||
-                label === 'yes' ||
-                text === 'confirm' ||
-                text === 'ok'
-            );
-        });
-    }
-
-    if (!yesBtn) {
-        setStatus('❌ Modal submission dialogue confirmation button missing.', 'error');
-        return false;
-    }
-
-    yesBtn.click();
-    
-    setStatus('Evaluating modal chain for trailing warnings...', 'info');
-    await sleep(800);
-
-    const proceedAnyway = queryAllContexts('button, .p-button, [role="button"]').find(el => {
-        const innerT = (el.innerText || el.textContent || '').trim().toLowerCase();
-        const labelT = (el.getAttribute('label') || '').toLowerCase();
-        return innerT.includes('proceed anyway') || labelT.includes('proceed anyway');
-    });
-
-    if (proceedAnyway) {
-        const contextData = extractReportContext();
-        if (contextData.reportType === 'In Port Report') {
-            setStatus('⚠️ Distance 0 warning caught in Port Context. Bypassing safely...', 'warning');
-            proceedAnyway.click();
-            setStatus('✅ "Proceed Anyway" bypassed warning successfully.', 'success');
-            await sleep(CONFIG.SLEEP_POST_CLICK_MS);
-        } else {
-            setStatus('🛑 LOCKOUT: Observed Distance is 0 warning in AT SEA context! Halted.', 'error');
-            return false;
-        }
-    }
-
-    setStatus('✅ Report successfully validated, signed off, and approved in system.', 'success');
-    await sleep(CONFIG.DOM_STABLE_HEADSTART_MS);
-    await waitForDOMStable();
-    return true;
+    return queryAllContexts('button, .p-button, [role="button"]').find(el => {
+        const elLabel = (el.getAttribute('label') || '').toLowerCase();
+        const elText  = matchVisibleText ? (el.innerText || el.textContent || '').trim().toLowerCase() : '';
+        return elLabel === lowerLabel || elLabel.includes(lowerLabel) || (matchVisibleText && elText === lowerLabel);
+    }) || null;
 }
-
-// ---------------------------------------------------------------------------
-//   REPORT REJECTION (DUPLICATE HANDLING)
-// ---------------------------------------------------------------------------
-
-async function rejectReportAsDuplicate(rejectionMessage) {
-    setStatus('Locating Reject control...', 'info');
-
-    let rejectBtn = queryAllContexts(
-        'button[label="Reject"], [appconfirmation][label="Reject"], .p-button[label="Reject"]'
-    )[0];
-
-    if (!rejectBtn) {
-        rejectBtn = queryAllContexts('button, .p-button, [role="button"]').find(el => {
-            const label = (el.getAttribute('label') || '').toLowerCase();
-            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
-            return label === 'reject' || label.includes('reject') || text === 'reject';
-        });
-    }
-
-    if (!rejectBtn) {
-        setStatus('❌ Reject control not found on screen — cannot auto-reject duplicate.', 'error');
-        return false;
-    }
-
-    rejectBtn.click();
-    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
-
-    const dialog = findOpenDialog();
-
-    if (dialog) {
-        const commentField = Array.from(dialog.querySelectorAll('textarea, input[type="text"]')).find(el => {
-            const id = (el.id || '').toLowerCase();
-            const name = (el.name || '').toLowerCase();
-            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
-            return id.includes('comment') || id.includes('remark') || id.includes('reason') ||
-                   name.includes('comment') || name.includes('remark') || name.includes('reason') ||
-                   ph.includes('comment') || ph.includes('remark') || ph.includes('reason');
-        });
-
-        if (commentField) {
-            commentField.value = rejectionMessage;
-            commentField.dispatchEvent(new Event('input', { bubbles: true }));
-            commentField.dispatchEvent(new Event('change', { bubbles: true }));
-            setStatus(`📝 Rejection reason entered in confirmation dialog: "${rejectionMessage}"`, 'warning');
-        } else {
-            setStatus('⚠️ No reason/comment field found inside the Reject confirmation dialog — proceeding without one.', 'warning');
-        }
-    } else {
-        setStatus('⚠️ No confirmation dialog detected after clicking Reject — proceeding without a reason field. (Remarks field intentionally left untouched.)', 'warning');
-    }
-
-    let confirmBtn = null;
-    if (dialog) {
-        confirmBtn = Array.from(dialog.querySelectorAll('button, .p-button, [role="button"]')).find(el => {
-            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
-            const label = (el.getAttribute('label') || '').toLowerCase();
-            return (
-                text === 'yes' || label === 'yes' ||
-                text === 'confirm' || text === 'ok' ||
-                text === 'reject' || label === 'reject' ||
-                text === 'submit'
-            );
-        });
-    }
-    if (!confirmBtn) {
-        confirmBtn = queryAllContexts('.p-confirm-dialog-accept, button[label="Yes"]')[0];
-    }
-
-    if (!confirmBtn) {
-        setStatus('❌ Rejection confirmation button not found. Reject dialog may require manual completion.', 'error');
-        return false;
-    }
-
-    confirmBtn.click();
-    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
-    await waitForDOMStable();
-
-    setStatus('✅ Report rejected due to duplicate detection.', 'warning');
-    return true;
-}
-
-// ---------------------------------------------------------------------------
-//   NAVIGATION
-// ---------------------------------------------------------------------------
-
-async function goToNextPendingReport() {
-    setStatus('Analyzing sidebar tracker matrix...', 'info');
-
-    const sidebarCards = queryAllContexts('.card, div[class*="card"]').filter(card => {
-        const text = card.innerText || '';
-        return text.includes('Report') || text.includes('Notice');
-    });
-
-    if (sidebarCards.length === 0) {
-        setStatus('🎉 Queue cleared successfully with clean data locks!', 'success');
-        return false;
-    }
-
-    const isPending = card => {
-        const bgColor = window.getComputedStyle(card).backgroundColor;
-        return (
-            bgColor === 'rgb(255, 255, 255)' ||
-            bgColor === 'rgba(0, 0, 0, 0)' ||
-            bgColor === 'transparent'
-        );
-    };
-
-    const isActive = card =>
-        card.classList.contains('active') ||
-        card.classList.contains('p-highlight') ||
-        card.classList.contains('selected') ||
-        !isPending(card);
-
-    const currentIndex = sidebarCards.findIndex(isActive);
-
-    const searchFrom = currentIndex >= 0 ? currentIndex - 1 : sidebarCards.length - 1;
-    let nextPendingCard = null;
-
-    for (let i = searchFrom; i >= 0; i--) {
-        if (isPending(sidebarCards[i])) {
-            nextPendingCard = sidebarCards[i];
-            break;
-        }
-    }
-
-    if (!nextPendingCard) {
-        for (let i = sidebarCards.length - 1; i > searchFrom; i--) {
-            if (isPending(sidebarCards[i])) {
-                nextPendingCard = sidebarCards[i];
-                setStatus('ℹ️ No pending reports ahead — wrapping to oldest unapproved entry.', 'info');
-                break;
-            }
-        }
-    }
-
-    if (nextPendingCard) {
-        setStatus('➡️ Transitioning interface context to next data index line...', 'success');
-        nextPendingCard.click();
-        await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
-        return true;
-    } else {
-        setStatus('🎉 Queue cleared successfully with clean data locks!', 'success');
-        return false;
-    }
-}
-
-// ---------------------------------------------------------------------------
-//   AUTOPILOT LOOP
-// ---------------------------------------------------------------------------
-
-function isCurrentReportAlreadyApproved() {
-    let screenText = '';
-    getAllContexts().forEach(ctx => {
-        if (ctx && ctx.body) screenText += ctx.body.innerText || '';
-    });
-    const hasApprovedBadge = queryAllContexts(
-        '.p-tag, .p-badge, [class*="approved"], [class*="status"]'
-    ).some(el => (el.innerText || '').trim().toLowerCase() === 'approved');
-
-    return hasApprovedBadge || (
-        screenText.includes('Re Ingest') || screenText.includes('Open for Resubmit')
-    );
-}
-
-async function runAutopilot() {
-    try {
-        if (isCurrentReportAlreadyApproved()) {
-            setStatus('⚠️ Current report already approved. Jumping to next unapproved...', 'warning');
-            const hasNext = await goToNextPendingReport();
-            if (!hasNext) {
-                window.autopilotRunning = false;
-                updateUIButton();
-                return;
-            }
-        }
-
-        while (window.autopilotRunning) {
-            const isValid = await validateCurrentReport();
-            if (!isValid) {
-                window.autopilotRunning = false;
-                updateUIButton();
-                break;
-            }
-
-            const approved = await approveReport();
-            if (approved === false) {
-                window.autopilotRunning = false;
-                updateUIButton();
-                break;
-            }
-
-            const hasMoreReports = await goToNextPendingReport();
-            if (!hasMoreReports) {
-                window.autopilotRunning = false;
-                updateUIButton();
-                break;
-            }
-        }
-    } catch (err) {
-        window.autopilotRunning = false;
-        updateUIButton();
-        setStatus(`💥 Operational Exception: ${err.message}`, 'error');
-    }
-}
-
-// ---------------------------------------------------------------------------
-//   UI CONTROL INTERFACE
-// ---------------------------------------------------------------------------
-
-function injectControlPanel() {
-    document.getElementById('autopilot-btn')?.remove();
-    document.getElementById('autopilot-status')?.remove();
-
-    const statusBox = document.createElement('div');
-    statusBox.id = 'autopilot-status';
-    statusBox.style.cssText = `
-        position: fixed; bottom: 85px; left: 20px; z-index: 99999;
-        padding: 12px; font-size: 13px; font-family: monospace;
-        background-color: rgba(10, 11, 15, 0.98); color: #fff;
-        border: 1px solid #444; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.7);
-        display: none; min-width: 400px; max-height: 250px; overflow-y: auto;
-    `;
-    document.body.appendChild(statusBox);
-
-    const btn = document.createElement('button');
-    btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v6.0.3)';
-    btn.style.cssText = `
-        position: fixed; bottom: 20px; left: 20px; z-index: 99999;
-        padding: 15px 25px; font-size: 16px; font-weight: bold;
-        background-color: #2e7d32; color: white; border: none;
-        border-radius: 5px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-    `;
-
-    btn.addEventListener('click', () => {
-        window.autopilotRunning = !window.autopilotRunning;
-        updateUIButton();
-        if (window.autopilotRunning) {
-            document.getElementById('autopilot-status').style.display = 'block';
-            runAutopilot();
-        } else {
-            setStatus('⏹ Interrupted execution chain manually.', 'warning');
-        }
-    });
-
-    document.body.appendChild(btn);
-}
-
-function setStatus(message, type = 'info') {
-    const box = document.getElementById('autopilot-status');
-    if (!box) return;
-
-    const colorMap = { success: '#81c784', error: '#e57373', warning: '#fff176' };
-    const color = colorMap[type] || '#ffffff';
-
-    const line = document.createElement('div');
-    line.style.cssText = `color: ${color}; margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px;`;
-    line.innerText = message;
-
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
-}
-
-function clearStatus() {
-    const box = document.getElementById('autopilot-status');
-    if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.0.3):</div>";
-    }
-}
-
-function updateUIButton() {
-    const btn = document.getElementById('autopilot-btn');
-    if (!btn) return;
-    if (window.autopilotRunning) {
-        btn.innerText = '⏹ STOP Autopilot';
-        btn.style.backgroundColor = '#c62828';
-    } else {
-        btn.innerText = '▶ Start Autopilot (v6.0.3)';
-        btn.style.backgroundColor = '#2e7d32';
-    }
-}
-
-injectControlPanel();
 
 // ===========================================================================
 //   Geoforms Timeline & Events Validation Engine
@@ -1721,6 +1166,7 @@ class GeoformsTimelineValidator {
             'Dry Dock / Shipyard Period',
             'Sea Trials',
             'Discharging',
+            'Loading',
             'Idle'
         ];
 
@@ -1789,50 +1235,31 @@ class GeoformsTimelineValidator {
     validateWhitelists(reportContext, row, result) {
         if (reportContext.reportType === 'At Sea NOON Report') {
             if (reportContext.isDepartureReport) {
-                const matchSea  = this.SEA_EVENTS_WHITELIST.some(
-                    e => e.toLowerCase() === row.eventType.toLowerCase()
-                );
-                const matchPort = this.PORT_EVENTS_WHITELIST.some(
-                    e => e.toLowerCase() === row.eventType.toLowerCase()
-                );
+                const matchSea  = this.SEA_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
+                const matchPort = this.PORT_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
                 if (!matchSea && !matchPort) {
-                    result.errors.push(
-                        `Row [${row.eventType}] is unauthorized in this Departure (mixed port/sea) report context.`
-                    );
+                    result.errors.push(`Row [${row.eventType}] is unauthorized in this Departure (mixed port/sea) report context.`);
                 }
             } else {
-                const match = this.SEA_EVENTS_WHITELIST.some(
-                    e => e.toLowerCase() === row.eventType.toLowerCase()
-                );
+                const match = this.SEA_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
                 if (!match) {
-                    result.errors.push(
-                        `Row [${row.eventType}] is unauthorized inside an 'At Sea' report context.`
-                    );
+                    result.errors.push(`Row [${row.eventType}] is unauthorized inside an 'At Sea' report context.`);
                 }
             }
         } else {
-            const match = this.PORT_EVENTS_WHITELIST.some(
-                e => e.toLowerCase() === row.eventType.toLowerCase()
-            );
+            const match = this.PORT_EVENTS_WHITELIST.some(e => e.toLowerCase() === row.eventType.toLowerCase());
             if (!match) {
-                result.errors.push(
-                    `Row [${row.eventType}] is unauthorized inside an 'In Port' or 'Arrival/Departure' context.`
-                );
+                result.errors.push(`Row [${row.eventType}] is unauthorized inside an 'In Port' or 'Arrival/Departure' context.`);
             }
         }
     }
 
     checkScenario01_TypicalPortCall(row, prevRow, result) {
         if (row.eventType.toLowerCase() === 'load - disch - idle') {
-            if (
-                !prevRow ||
-                (prevRow.eventType.toLowerCase() !== 'shift to berth' &&
-                    prevRow.eventType.toLowerCase() !== 'load - disch - idle')
-            ) {
+            if (!prevRow || (prevRow.eventType.toLowerCase() !== 'shift to berth' && prevRow.eventType.toLowerCase() !== 'load - disch - idle')) {
                 result.errors.push("Cargo operations ('Load - Disch - Idle') must be preceded by a physical 'Shift to Berth' event.");
             }
         }
-
         if (prevRow && prevRow.eventType.toLowerCase() === 'shift from last berth to sea') {
             if (row.eventType.toLowerCase() === 'load - disch - idle') {
                 result.errors.push("Terminal State Violation: Cargo handling is strictly barred following a 'Shift from Last Berth to Sea' event.");
@@ -1856,22 +1283,14 @@ class GeoformsTimelineValidator {
 
     checkScenario03_04_10_11_IntermediateRows(row, result) {
         if (!row.isIntermediateTransitionRow) return;
-
-        if (row.durationMinutes !== 1) {
-            result.errors.push('Boundary Error: Intermediate transition row must span exactly 1 minute.');
-        }
-        if (row.distance !== 0) {
-            result.errors.push('Boundary Error: Distance on virtual transition row must be exactly 0.');
-        }
-        if (row.meConsumption !== 0) {
-            result.errors.push('Boundary Error: ME Fuel consumption on boundary row must be exactly 0.00 MT.');
-        }
+        if (row.durationMinutes !== 1)  result.errors.push('Boundary Error: Intermediate transition row must span exactly 1 minute.');
+        if (row.distance !== 0)         result.errors.push('Boundary Error: Distance on virtual transition row must be exactly 0.');
+        if (row.meConsumption !== 0)    result.errors.push('Boundary Error: ME Fuel consumption on boundary row must be exactly 0.00 MT.');
     }
 
     checkScenario07_CanalTransit(reportContext, row, result) {
         if (row.eventType.toLowerCase() === 'canal/strait transit') {
             row.isExitTerminalState = true;
-
             if (reportContext.cargoQuantityBeforeTransit !== reportContext.cargoQuantityAfterTransit) {
                 result.errors.push('Scenario #07 Integrity Failure: Cargo Figures must match identically before and after execution of Canal/Strait Transit.');
             }
@@ -1880,10 +1299,7 @@ class GeoformsTimelineValidator {
 
     checkScenario08_AtSeaNoon(reportContext, row, result) {
         if (reportContext.reportType === 'At Sea NOON Report' && !reportContext.isDepartureReport) {
-            if (
-                row.eventType.toLowerCase() === 'drifting' ||
-                row.eventType.toLowerCase() === 'stoppage for safety reasons'
-            ) {
+            if (row.eventType.toLowerCase() === 'drifting' || row.eventType.toLowerCase() === 'stoppage for safety reasons') {
                 if (reportContext.seaSteamingHours !== 0) {
                     result.errors.push('Scenario #08 Contradiction: Sea Steaming Hours must drop to 0 when active event is Drifting or Stoppage for Safety Reasons.');
                 }
@@ -1895,21 +1311,15 @@ class GeoformsTimelineValidator {
         if (index === 0 && row.eventType.toLowerCase() === 'drifting') {
             row.requiresImmediateLocationShiftNext = true;
         }
-
         if (index === 1) {
             const previousRow = this._prevRowForScenario09;
             if (previousRow && previousRow.requiresImmediateLocationShiftNext) {
                 const lowEvent = row.eventType.toLowerCase();
-                if (
-                    lowEvent !== 'shift to anchor' &&
-                    lowEvent !== 'shifting to anchorage' &&
-                    lowEvent !== 'shift to berth'
-                ) {
+                if (lowEvent !== 'shift to anchor' && lowEvent !== 'shifting to anchorage' && lowEvent !== 'shift to berth') {
                     result.errors.push("Scenario #09 Violation: Post-arrival drifting must terminate directly into a 'Shift to Anchor' or 'Shift to Berth' event.");
                 }
             }
         }
-
         this._prevRowForScenario09 = row;
     }
 
@@ -1923,27 +1333,20 @@ class GeoformsTimelineValidator {
 
     checkScenario11_DryDock(row, result) {
         const lowEvent = row.eventType.toLowerCase();
-        if (
-            lowEvent === 'dry dock / shipyard period' ||
-            lowEvent === 'sea trials'
-        ) {
+        if (lowEvent === 'dry dock / shipyard period' || lowEvent === 'sea trials') {
             this._inDryDockState = true;
         }
-
         if (lowEvent === 'shift to berth') {
             this._inDryDockState = false;
         }
-
         if (this._inDryDockState && lowEvent === 'load - disch - idle') {
             result.errors.push('Scenario #11 Security Block: Cargo operations are barred while vessel status reflects Dry Dock or Sea Trials.');
         }
     }
 
     validateBaseMinitiaeRules(row, result) {
-        if (row.durationMinutes > 6) {
-            if (row.meConsumption <= 0) {
-                result.warnings.push(`Row [${row.eventType}] exceeds 6 mins duration. Verifier profile requires minimum consumption declaration (e.g. 0.01 MT).`);
-            }
+        if (row.durationMinutes > 6 && row.meConsumption <= 0) {
+            result.warnings.push(`Row [${row.eventType}] exceeds 6 mins duration. Verifier profile requires minimum consumption declaration (e.g. 0.01 MT).`);
         }
     }
 }
@@ -1951,5 +1354,783 @@ class GeoformsTimelineValidator {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = GeoformsTimelineValidator;
 }
+
+// ---------------------------------------------------------------------------
+//   CAPTURE CURRENT REPORT CONTEXT
+//
+//   All navigation to adjacent report cards happens HERE, before any
+//   validation logic runs.  validateCurrentReport() receives the already-
+//   scraped snapshots as parameters and never navigates itself.
+//
+//   Returns: { futureBunkerSnapshot, previousBunkerSnapshot,
+//              hasFutureCard, hasPreviousCard,
+//              currentSig, sidebarCards, currentCard }
+// ---------------------------------------------------------------------------
+
+async function gatherCrossReportBunkerData() {
+    const sidebarCards = getAllReportCards();
+    const currentCard  = identifyCurrentCard(sidebarCards);
+    const currentSig   = currentCard ? extractCardSignature(currentCard) : null;
+
+    const base = {
+        futureBunkerSnapshot:   [],
+        previousBunkerSnapshot: [],
+        hasFutureCard:  false,
+        hasPreviousCard: false,
+        currentSig,
+        sidebarCards,
+        currentCard
+    };
+
+    setStatus('Current report context captured. Skipping adjacent-report bunker checks.', 'info');
+    return base;
+}
+
+// ---------------------------------------------------------------------------
+//   NAVIGATE BACK TO A KNOWN REPORT  (robust, multi-strategy)
+// ---------------------------------------------------------------------------
+
+async function navigateBackToReport(targetSig, fallbackCard) {
+    // Strategy 1: find card by signature match in a freshly queried list
+    const freshCards = getAllReportCards();
+    const matchedCard = freshCards.find(c => signaturesMatch(extractCardSignature(c), targetSig));
+
+    const clickTarget = matchedCard || fallbackCard;
+    if (clickTarget) {
+        clickTarget.click();
+        await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+        await waitForDOMStable();
+    }
+
+    // Verification pass — confirm we are now on the expected report
+    const verifyCards   = getAllReportCards();
+    const activeCard    = identifyCurrentCard(verifyCards);
+    const activeSig     = activeCard ? extractCardSignature(activeCard) : null;
+
+    if (activeSig && signaturesMatch(activeSig, targetSig)) {
+        return true; // confirmed
+    }
+
+    // Strategy 2: second attempt with a broader search
+    const retryCard = verifyCards.find(c => signaturesMatch(extractCardSignature(c), targetSig));
+    if (retryCard) {
+        setStatus('⚠️ Return-navigation: signature mismatch on first attempt — retrying...', 'warning');
+        retryCard.click();
+        await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+        await waitForDOMStable();
+        return true;
+    }
+
+    setStatus('⚠️ Return-navigation: could not confirm current report by signature — proceeding on best-effort.', 'warning');
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+//   ENSURE ON CURRENT REPORT (guard called before approval)
+// ---------------------------------------------------------------------------
+
+async function ensureOnCurrentReport(currentSig, fallbackCard) {
+    const freshCards = getAllReportCards();
+    const activeCard = identifyCurrentCard(freshCards);
+    const activeSig  = activeCard ? extractCardSignature(activeCard) : null;
+
+    if (activeSig && signaturesMatch(activeSig, currentSig)) {
+        return true; // already on the right report
+    }
+
+    setStatus('⚠️ Pre-approval guard: UI is not on the expected report — navigating back...', 'warning');
+    return navigateBackToReport(currentSig, fallbackCard);
+}
+
+// ---------------------------------------------------------------------------
+//   CORE VALIDATION RUNNER  (no navigation inside this function)
+//
+//   Current report card context is supplied via the `crossReportData`
+//   parameter captured by gatherCrossReportBunkerData().
+//   This function NEVER clicks a sidebar card or navigates.
+// ---------------------------------------------------------------------------
+
+async function validateCurrentReport(crossReportData) {
+    clearStatus();
+    setStatus('Initiating Smart Sandbox Scan (v6.1.5)...', 'info');
+    await sleep(CONFIG.SLEEP_INIT_MS);
+
+    if (isCurrentReportAlreadyApproved()) {
+        setStatus('⚠️ Current report is already approved. Skipping validation and moving ahead.', 'warning');
+        return true;
+    }
+
+    let isValid = true;
+    const errors = [];
+
+    // ── 1. DUPLICATE TIMESTAMP SCAN ─────────────────────────────────────────
+    setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
+    const duplicateMatch = checkIsDuplicateReport();
+    if (duplicateMatch) {
+        const { currentSig, matchedSig } = duplicateMatch;
+        setStatus('🛑 LOCKOUT: Duplicate report detected.', 'error');
+        setStatus(`   Current report:  ${describeSignature(currentSig)}`, 'error');
+        setStatus(`   Matches existing report:  ${describeSignature(matchedSig)}`, 'error');
+
+        const rejectionMessage =
+            `Duplicate Report Detected: this report (${describeSignature(currentSig)}) ` +
+            `matches an existing report already on file (${describeSignature(matchedSig)}).`;
+
+        const rejected = await rejectReportAsDuplicate(rejectionMessage);
+        if (rejected) {
+            setStatus('✅ Report rejected automatically with duplicate explanation. Halted for review.', 'warning');
+        } else {
+            setStatus('⚠️ Could not complete automatic rejection — manual review required. Halted.', 'error');
+        }
+        return false;
+    } else {
+        setStatus('✅ Duplicate Scan: No matching duplicate found in the report list.', 'success');
+    }
+
+    // ── 2. PORT EVENTS BLOCK CHECK ───────────────────────────────────────────
+    setStatus('Analyzing active operational event parameters...', 'info');
+    const eventCheck = validatePortEvents();
+
+    if (eventCheck.status === 'INVALID') {
+        isValid = false;
+        setStatus(`🛑 LOCKOUT: Unapproved event scenario detected [${eventCheck.event}]. Halted.`, 'error');
+        return false;
+    } else if (eventCheck.status === 'VALID_PORT') {
+        setStatus('✅ Operational Scenario: Approved Port Event layout and sequence rules confirmed.', 'success');
+    } else {
+        setStatus('✅ Operational Scenario: Approved At Sea state profile confirmed.', 'success');
+    }
+
+    // ── 3. STEAMING HOURS VALIDATION ─────────────────────────────────────────
+    const earlyContext = extractReportContext();
+    const steamingHoursInput = findSteamingHoursInput();
+    if (steamingHoursInput && steamingHoursInput.value.trim() !== '') {
+        const hours = parseFloat(steamingHoursInput.value);
+
+        if (isNaN(hours)) {
+            errors.push(`Steaming hours (${hours}) is not a valid number.`);
+            steamingHoursInput.style.border = FIELD_STYLES.ERROR_BORDER_ONLY;
+            scrollToIssueElement(steamingHoursInput, 'Steaming Hours value is not a valid number.');
+            isValid = false;
+            setStatus(`❌ Steaming hrs failed numeric check: ${hours}`, 'error');
+        } else if (earlyContext.reportType === 'In Port Report') {
+            if (hours < 0 || hours > 25) {
+                errors.push(`Steaming hours (${hours}) outside allowed in-port range [0–25].`);
+                steamingHoursInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                scrollToIssueElement(steamingHoursInput, 'In-port Steaming Hours must be between 0 and 25.');
+                isValid = false;
+                setStatus(`❌ Steaming Hours In-Port Check: ${hours} hrs is outside allowed range [0–25].`, 'error');
+            } else {
+                steamingHoursInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+                setStatus(`✅ Steaming Hours In-Port Check: ${hours} hrs is within allowed range [0–25].`, 'success');
+            }
+        } else {
+            // At Sea reports must match the calculated elapsed time from the one-back report.
+            const { sidebarCards, currentCard, currentSig: preSig } = crossReportData || {};
+
+            const resolvedCards = sidebarCards || getAllReportCards();
+            const resolvedCard  = currentCard  || identifyCurrentCard(resolvedCards);
+            const resolvedSig   = preSig       || (resolvedCard ? extractCardSignature(resolvedCard) : null);
+
+            if (!resolvedCard || !resolvedSig || isNaN(reportTimestamp(resolvedSig))) {
+                errors.push('Unable to calculate steaming hours because this report date/time could not be read from the report list.');
+                steamingHoursInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                scrollToIssueElement(steamingHoursInput, 'This report date/time could not be read for Steaming Hours calculation.');
+                isValid = false;
+                setStatus('❌ Steaming Hours Elapsed-Time Check: Current report date/time could not be read from the report list.', 'error');
+            } else {
+                const prevCardForSteaming = findOneReportBackCard(resolvedSig, resolvedCards, resolvedCard);
+
+                if (!prevCardForSteaming) {
+                    errors.push('Unable to calculate steaming hours because the one-back report was not found.');
+                    steamingHoursInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                    scrollToIssueElement(steamingHoursInput, 'One-back report was not found for Steaming Hours calculation.');
+                    isValid = false;
+                    setStatus('❌ Steaming Hours Elapsed-Time Check: One-back report was not found.', 'error');
+                } else {
+                    const prevSig = extractCardSignature(prevCardForSteaming);
+                    const currentTs = reportTimestamp(resolvedSig);
+                    const prevTs = reportTimestamp(prevSig);
+
+                    if (isNaN(prevTs)) {
+                        errors.push('Unable to calculate steaming hours because the one-back report date/time could not be read.');
+                        steamingHoursInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                        scrollToIssueElement(steamingHoursInput, 'One-back report date/time could not be read for Steaming Hours calculation.');
+                        isValid = false;
+                        setStatus('❌ Steaming Hours Elapsed-Time Check: One-back report date/time could not be read.', 'error');
+                    } else {
+                        const actualElapsedHours = (currentTs - prevTs) / (1000 * 60 * 60);
+                        const diff = Math.abs(actualElapsedHours - hours);
+
+                        const refLabel  = `${prevSig.date} ${prevSig.time} ${prevSig.utcOffset || '+00:00'}`;
+                        const currLabel = `${resolvedSig.date} ${resolvedSig.time} ${resolvedSig.utcOffset || '+00:00'}`;
+
+                        if (actualElapsedHours < 0) {
+                            errors.push(`Steaming hours could not be calculated because the one-back report (${refLabel}) is later than this report (${currLabel}).`);
+                            steamingHoursInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                            scrollToIssueElement(steamingHoursInput, 'One-back report timestamp is later than current report timestamp.');
+                            isValid = false;
+                            setStatus(`❌ Steaming Hours Elapsed-Time Check: One-back report (${refLabel}) is later than current report (${currLabel}).`, 'error');
+                        } else if (diff > CONFIG.STEAMING_HOURS_ELAPSED_TOLERANCE) {
+                            setStatus(`🔍 DEBUG — current card: ${currLabel}`, 'warning');
+                            setStatus(`🔍 DEBUG — one-back card: ${refLabel} | calculated=${actualElapsedHours.toFixed(2)} hrs | reported=${hours} hrs`, 'warning');
+                            errors.push(`Steaming hours (${hours}) does not match calculated elapsed time (${actualElapsedHours.toFixed(2)} hrs) between this report (${currLabel}) and the one-back report (${refLabel}).`);
+                            steamingHoursInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                            scrollToIssueElement(steamingHoursInput, 'Steaming Hours does not match the calculated elapsed time.');
+                            isValid = false;
+                            setStatus(`❌ Steaming Hours Elapsed-Time Check: Reported ${hours} hrs ≠ calculated ${actualElapsedHours.toFixed(2)} hrs from one-back report (${refLabel}).`, 'error');
+                        } else {
+                            steamingHoursInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+                            setStatus(`✅ Steaming Hours Elapsed-Time Check: Reported ${hours} hrs matches calculated ${actualElapsedHours.toFixed(2)} hrs from one-back report (${refLabel}).`, 'success');
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        setStatus('ℹ️ Steaming Hours: Field unpopulated or not applicable to this report layout index.', 'info');
+    }
+
+    // ── 4. ROB VALIDATION — current report only ─────────────────────────────
+    //   No navigation happens here.
+    setStatus('Targeting isolated Bunker ROB grid for values and ADJ fields...', 'info');
+    const currentBunkerCheck = scrapeBunkerSnapshot();
+
+    // Diagnostic dump
+    if (currentBunkerCheck.length === 0) {
+        setStatus('🔍 DEBUG Bunker Scrape: 0 rows found — locateBunkerRows() returned empty.', 'warning');
+    } else {
+        currentBunkerCheck.forEach((r, i) => {
+            setStatus(
+                `🔍 DEBUG Row[${i}] "${r.displayLabel}": ` +
+                `lastRob=${r.lastRob === null ? 'NULL' : r.lastRob}  ` +
+                `robStart=${r.robStart === null ? 'NULL' : r.robStart}  ` +
+                `robEnd=${r.robEnd === null ? 'NULL' : r.robEnd}  ` +
+                `adj=${r.adj}  ` +
+                `lastRobInput=${r.lastRobInput ? (r.lastRobInput.tagName === 'INPUT' ? 'INPUT' : 'CELL') : 'MISSING'}  ` +
+                `robStartInput=${r.robStartInput ? (r.robStartInput.tagName === 'INPUT' ? 'INPUT' : 'CELL') : 'MISSING'}  ` +
+                `robEndInput=${r.robEndInput ? (r.robEndInput.tagName === 'INPUT' ? 'INPUT' : 'CELL') : 'MISSING'}`,
+                'info'
+            );
+        });
+    }
+
+    if (currentBunkerCheck.length === 0) {
+        if (CONFIG.REQUIRE_BUNKER_DATA) {
+            scrollToIssueElement(
+                locateTrueBunkerContainer(),
+                'Bunker ROB grid could not be read. Review the BUNKERS ROB block.'
+            );
+            setStatus('🛑 LOCKOUT: Bunker ROB grid not found on this report page. REQUIRE_BUNKER_DATA = true — cannot approve without verifying ROB values.', 'error');
+            isValid = false;
+        } else {
+            setStatus('ℹ️ Bunker ROB section absent — REQUIRE_BUNKER_DATA is false, skipping.', 'info');
+        }
+    }
+
+    if (currentBunkerCheck.length > 0) {
+
+        // ── WITHIN-REPORT ROB INTEGRITY CHECK ───────────────────────────────
+        let withinReportFailed = false;
+        setStatus('Verifying within-report ROB integrity (Last ROB = ROB Start)...', 'info');
+
+        currentBunkerCheck.forEach(curr => {
+            if (curr.lastRob === null && curr.robStart === null) {
+                setStatus(`ℹ️ ROB Check [${curr.displayLabel}]: No values entered — skipping.`, 'info');
+                return;
+            }
+
+            if (curr.lastRob === null || curr.robStart === null) {
+                const nullMsg =
+                    `[${curr.displayLabel}] Could not extract ` +
+                    `${curr.lastRob  === null ? 'Last ROB (NULL)' : `Last ROB (${curr.lastRob})`} / ` +
+                    `${curr.robStart === null ? 'ROB Start (NULL)' : `ROB Start (${curr.robStart})`} ` +
+                    `— column detection failed. Cannot validate ROB continuity for this row.`;
+                errors.push(nullMsg);
+                setStatus(`❌ Scrape Failure [${curr.displayLabel}]: Partial data — Last ROB=${curr.lastRob} ROB Start=${curr.robStart}. Blocking approval.`, 'error');
+                scrollToIssueElement(
+                    curr.lastRobInput || curr.robStartInput || curr.robEndInput,
+                    `Bunker row [${curr.displayLabel}] could not be read completely.`
+                );
+                isValid = false;
+                withinReportFailed = true;
+                return;
+            }
+
+            let rowFailed = false;
+
+            const robMismatch = Math.abs(curr.lastRob - curr.robStart) > CONFIG.ADJ_TOLERANCE;
+            if (robMismatch) {
+                const errMsg = `[${curr.displayLabel}] Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}). They must be identical.`;
+                errors.push(errMsg);
+                if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = FIELD_STYLES.ERROR_KEYWORD_FULL;
+                if (curr.robStartInput) curr.robStartInput.style.cssText = FIELD_STYLES.ERROR_KEYWORD_FULL;
+                setStatus(`❌ ROB Mismatch [${curr.displayLabel}]: Last ROB (${curr.lastRob}) ≠ ROB Start (${curr.robStart}) — values must be identical.`, 'error');
+                scrollToIssueElement(
+                    curr.lastRobInput || curr.robStartInput,
+                    `Bunker ROB mismatch found in row [${curr.displayLabel}].`
+                );
+                isValid = false;
+                withinReportFailed = true;
+                rowFailed = true;
+            }
+
+            if (!rowFailed) {
+                if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = FIELD_STYLES.SUCCESS_FULL;
+                if (curr.robStartInput) curr.robStartInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+                setStatus(`✅ ROB Match [${curr.displayLabel}]: Last ROB = ROB Start = ${curr.lastRob}`, 'success');
+            }
+        });
+
+        if (withinReportFailed) {
+            setStatus('🛑 Within-Report ROB Integrity FAILED — halting.', 'error');
+        } else {
+            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB = ROB Start).', 'success');
+        }
+    }
+
+    // ── 5. GEOFORMS TIMELINE & COMPLIANCE SCENARIOS BRIDGE ──────────────────
+    setStatus('Linking state parameters with Timeline Engine Matrix...', 'info');
+    const reportContext = extractReportContext();
+    const eventRows = scrapeTimelineEventRows();
+
+    if (eventRows.length > 0) {
+        const timelineValidator = new GeoformsTimelineValidator();
+        const timelineResult = timelineValidator.validateTimeline(reportContext, eventRows);
+
+        if (!timelineResult.isValid) {
+            isValid = false;
+            timelineResult.errors.forEach(err => {
+                errors.push(`[Timeline Matrix] ${err}`);
+                setStatus(`🛑 Regulation Lockout: ${err}`, 'error');
+            });
+        } else {
+            setStatus('✅ Timeline Compliance Matrix: All carbon footprint scenarios and event sequencing rules are fully compliant.', 'success');
+        }
+        timelineResult.warnings.forEach(warn => {
+            setStatus(`⚠️ Timeline Notice: ${warn}`, 'warning');
+        });
+    } else {
+        setStatus('ℹ️ No active event grid objects extracted to check scenario state cascades.', 'info');
+    }
+
+    await sleep(CONFIG.SLEEP_POLL_MS);
+
+    if (!isValid) {
+        setStatus('🛑 LOCKOUT: Validation errors caught. Autopilot halted.', 'error');
+    } else {
+        setStatus('🎉 All system safety checks cleared successfully.', 'success');
+    }
+
+    return isValid;
+}
+
+// ---------------------------------------------------------------------------
+//   REPORT APPROVAL WITH WARNING INTERCEPTOR
+//
+//   v6.1.2 FIX A retained: selector covers p-confirm-popup-accept and
+//   aria-label="Yes".
+//
+//   v6.1.3 FIX D: waitForDOMStable() inserted after the initial click delay
+//   so the PrimeNG confirm-popup has fully rendered before the Yes-button
+//   query runs.  A retry loop (up to YES_BTN_RETRY_COUNT × YES_BTN_RETRY_DELAY_MS)
+//   further guards against residual render-timing variance.
+// ---------------------------------------------------------------------------
+
+async function approveReport() {
+    setStatus('Scanning interface for submission buttons...', 'info');
+    const approveBtn = findActionButton('Approve');
+
+    if (!approveBtn) {
+        const mainText = getMainContentText();
+        if (
+            mainText.includes('Approved') &&
+            (mainText.includes('Re Ingest') || mainText.includes('Resubmit') || mainText.includes('Open for Resubmit'))
+        ) {
+            setStatus('⚠️ File is already approved. Proceeding to skip forward...', 'warning');
+            return 'skipped';
+        }
+        setStatus('❌ Submission button context link unreadable.', 'error');
+        return false;
+    }
+
+    approveBtn.click();
+    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+    // FIX D: wait for the PrimeNG popup to finish rendering
+    await waitForDOMStable();
+
+    setStatus('Confirming report verification dialogue...', 'info');
+
+    // Primary selector — covers both PrimeNG dialog and popup variants
+    const YES_SELECTOR = '.p-confirm-dialog-accept, .p-confirm-popup-accept, button[aria-label="Yes"]';
+
+    let yesBtn = queryAllContexts(YES_SELECTOR)[0];
+
+    // FIX D: retry loop for popup render-timing variance
+    if (!yesBtn) {
+        for (let attempt = 0; attempt < CONFIG.YES_BTN_RETRY_COUNT; attempt++) {
+            await sleep(CONFIG.YES_BTN_RETRY_DELAY_MS);
+            await waitForDOMStable();
+            yesBtn = queryAllContexts(YES_SELECTOR)[0];
+            if (yesBtn) {
+                setStatus(`ℹ️ Yes-button found on retry attempt ${attempt + 1}.`, 'info');
+                break;
+            }
+        }
+    }
+
+    // Text-based fallback
+    if (!yesBtn) {
+        yesBtn = queryAllContexts('button, .p-button, [role="button"]').find(el => {
+            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const label = (el.getAttribute('label') || '').toLowerCase();
+            const aria  = (el.getAttribute('aria-label') || '').toLowerCase();
+            return (
+                text === 'yes' ||
+                label === 'yes' ||
+                aria === 'yes' ||
+                text === 'confirm' ||
+                text === 'ok'
+            );
+        });
+    }
+
+    if (!yesBtn) {
+        setStatus('❌ Modal submission dialogue confirmation button missing after all retry attempts.', 'error');
+        return false;
+    }
+
+    yesBtn.click();
+
+    setStatus('Evaluating modal chain for trailing warnings...', 'info');
+    await sleep(CONFIG.SLEEP_POST_DIALOG_MS);
+
+    const proceedAnyway = queryAllContexts('button, .p-button, [role="button"]').find(el => {
+        const innerT = (el.innerText || el.textContent || '').trim().toLowerCase();
+        const labelT = (el.getAttribute('label') || '').toLowerCase();
+        return innerT.includes('proceed anyway') || labelT.includes('proceed anyway');
+    });
+
+    if (proceedAnyway) {
+        const contextData = extractReportContext();
+        if (contextData.reportType === 'In Port Report') {
+            setStatus('⚠️ Distance 0 warning caught in Port Context. Bypassing safely...', 'warning');
+            proceedAnyway.click();
+            setStatus('✅ "Proceed Anyway" bypassed warning successfully.', 'success');
+            await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+        } else {
+            setStatus('🛑 LOCKOUT: Observed Distance is 0 warning in AT SEA context! Halted.', 'error');
+            return false;
+        }
+    }
+
+    setStatus('✅ Report successfully validated, signed off, and approved in system.', 'success');
+    await sleep(CONFIG.DOM_STABLE_HEADSTART_MS);
+    await waitForDOMStable();
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+//   REPORT REJECTION (DUPLICATE HANDLING)
+// ---------------------------------------------------------------------------
+
+async function rejectReportAsDuplicate(rejectionMessage) {
+    setStatus('Locating Reject control...', 'info');
+
+    const rejectBtn = findActionButton('Reject', { matchVisibleText: true });
+
+    if (!rejectBtn) {
+        setStatus('❌ Reject control not found on screen — cannot auto-reject duplicate.', 'error');
+        return false;
+    }
+
+    rejectBtn.click();
+    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+
+    const dialog = findOpenDialog();
+
+    if (dialog) {
+        const commentField = Array.from(dialog.querySelectorAll('textarea, input[type="text"]')).find(el => {
+            const id = (el.id || '').toLowerCase();
+            const name = (el.name || '').toLowerCase();
+            const ph = (el.getAttribute('placeholder') || '').toLowerCase();
+            return id.includes('comment') || id.includes('remark') || id.includes('reason') ||
+                   name.includes('comment') || name.includes('remark') || name.includes('reason') ||
+                   ph.includes('comment') || ph.includes('remark') || ph.includes('reason');
+        });
+
+        if (commentField) {
+            commentField.value = rejectionMessage;
+            commentField.dispatchEvent(new Event('input', { bubbles: true }));
+            commentField.dispatchEvent(new Event('change', { bubbles: true }));
+            setStatus(`📝 Rejection reason entered in confirmation dialog: "${rejectionMessage}"`, 'warning');
+        } else {
+            setStatus('⚠️ No reason/comment field found inside the Reject confirmation dialog — proceeding without one.', 'warning');
+        }
+    } else {
+        setStatus('⚠️ No confirmation dialog detected after clicking Reject — proceeding without a reason field.', 'warning');
+    }
+
+    let confirmBtn = null;
+    if (dialog) {
+        confirmBtn = Array.from(dialog.querySelectorAll('button, .p-button, [role="button"]')).find(el => {
+            const text  = (el.innerText || el.textContent || '').trim().toLowerCase();
+            const label = (el.getAttribute('label') || '').toLowerCase();
+            return (
+                text === 'yes' || label === 'yes' ||
+                text === 'confirm' || text === 'ok' ||
+                text === 'reject' || label === 'reject' ||
+                text === 'submit'
+            );
+        });
+    }
+    if (!confirmBtn) {
+        confirmBtn = queryAllContexts('.p-confirm-dialog-accept, .p-confirm-popup-accept, button[aria-label="Yes"]')[0];
+    }
+
+    if (!confirmBtn) {
+        setStatus('❌ Rejection confirmation button not found. Reject dialog may require manual completion.', 'error');
+        return false;
+    }
+
+    confirmBtn.click();
+    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+    await waitForDOMStable();
+
+    setStatus('✅ Report rejected due to duplicate detection.', 'warning');
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+//   NAVIGATION
+// ---------------------------------------------------------------------------
+
+async function goToNextPendingReport() {
+    setStatus('Analyzing sidebar tracker matrix...', 'info');
+
+    const sidebarCards = queryAllContexts('.card, div[class*="card"]').filter(card => {
+        const text = card.innerText || '';
+        return text.includes('Report') || text.includes('Notice');
+    });
+
+    if (sidebarCards.length === 0) {
+        setStatus('🎉 Queue cleared successfully with clean data locks!', 'success');
+        return false;
+    }
+
+    const isPending = card => {
+        const bgColor = window.getComputedStyle(card).backgroundColor;
+        return (
+            bgColor === 'rgb(255, 255, 255)' ||
+            bgColor === 'rgba(0, 0, 0, 0)' ||
+            bgColor === 'transparent'
+        );
+    };
+
+    const isActive = card =>
+        card.classList.contains('active') ||
+        card.classList.contains('p-highlight') ||
+        card.classList.contains('selected') ||
+        !isPending(card);
+
+    const currentIndex = sidebarCards.findIndex(isActive);
+
+    const searchFrom = currentIndex >= 0 ? currentIndex - 1 : sidebarCards.length - 1;
+    let nextPendingCard = null;
+
+    for (let i = searchFrom; i >= 0; i--) {
+        if (isPending(sidebarCards[i])) {
+            nextPendingCard = sidebarCards[i];
+            break;
+        }
+    }
+
+    if (nextPendingCard) {
+        setStatus('➡️ Transitioning interface context to next data index line...', 'success');
+        nextPendingCard.click();
+        await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+        return true;
+    } else {
+        setStatus('🎉 No pending reports ahead. Autopilot stopped — all reports ahead have been approved.', 'success');
+        return false;
+    }
+}
+
+// ---------------------------------------------------------------------------
+//   AUTOPILOT LOOP  (corrected approval flow)
+//
+//   Sequence per report:
+//     1. gatherCrossReportBunkerData()  — capture current report card context.
+//     2. validateCurrentReport()         — pure in-place validation using the
+//                                         pre-gathered snapshots.  No nav.
+//     3. ensureOnCurrentReport()         — guard: confirm UI is on the correct
+//                                         report before clicking Approve.
+//     4. approveReport()                 — clicks Approve on the current report,
+//                                         handles the confirm popup.
+//     5. goToNextPendingReport()         — only called after a successful or
+//                                         skipped approval.
+// ---------------------------------------------------------------------------
+
+function isCurrentReportAlreadyApproved() {
+    const screenText = getMainContentText();
+    const hasApprovedBadge = queryAllContexts(
+        '.p-tag, .p-badge, [class*="approved"], [class*="status"]'
+    ).some(el => {
+        if (el.closest('.card, [class*="card"], .report-item, li[class*="report"]')) return false;
+        return (el.innerText || '').trim().toLowerCase() === 'approved';
+    });
+
+    return hasApprovedBadge || (
+        screenText.includes('Re Ingest') || screenText.includes('Open for Resubmit')
+    );
+}
+
+async function runAutopilot() {
+    try {
+        while (window.autopilotRunning) {
+            if (isCurrentReportAlreadyApproved()) {
+                setStatus('⚠️ Current report already approved. Looking for next pending report...', 'warning');
+                const hasNext = await goToNextPendingReport();
+                if (!hasNext) {
+                    window.autopilotRunning = false;
+                    updateUIButton();
+                    break;
+                }
+                continue;
+            }
+
+            // ── STEP 1: Capture current report context ──────────────────────
+            setStatus('━━━ Context phase: capturing current report data ━━━', 'info');
+            const crossReportData = await gatherCrossReportBunkerData();
+
+            // ── STEP 2: Validate — no navigation occurs inside here ───────────
+            setStatus('━━━ Validation phase: running all checks on current report ━━━', 'info');
+            const isValid = await validateCurrentReport(crossReportData);
+
+            if (!isValid) {
+                window.autopilotRunning = false;
+                updateUIButton();
+                break;
+            }
+
+            // ── STEP 3: Confirm we are still on the correct report ─────────────
+            if (crossReportData.currentSig) {
+                const onTarget = await ensureOnCurrentReport(
+                    crossReportData.currentSig,
+                    crossReportData.currentCard
+                );
+                if (!onTarget) {
+                    setStatus('🛑 Pre-approval guard failed — could not confirm current report. Halting.', 'error');
+                    window.autopilotRunning = false;
+                    updateUIButton();
+                    break;
+                }
+            }
+
+            // ── STEP 4: Approve the current report ────────────────────────────
+            setStatus('━━━ Approval phase: submitting current report ━━━', 'info');
+            const approved = await approveReport();
+
+            if (approved === false) {
+                window.autopilotRunning = false;
+                updateUIButton();
+                break;
+            }
+
+            // ── STEP 5: Navigate to next pending report ───────────────────────
+            setStatus('━━━ Navigation phase: moving to next pending report ━━━', 'info');
+            const hasMoreReports = await goToNextPendingReport();
+
+            if (!hasMoreReports) {
+                window.autopilotRunning = false;
+                updateUIButton();
+                break;
+            }
+        }
+    } catch (err) {
+        window.autopilotRunning = false;
+        updateUIButton();
+        setStatus(`💥 Operational Exception: ${err.message}`, 'error');
+    }
+}
+
+// ---------------------------------------------------------------------------
+//   UI CONTROL INTERFACE
+// ---------------------------------------------------------------------------
+
+function injectControlPanel() {
+    document.getElementById('autopilot-btn')?.remove();
+    document.getElementById('autopilot-status')?.remove();
+
+    const statusBox = document.createElement('div');
+    statusBox.id = 'autopilot-status';
+    statusBox.style.cssText = `
+        position: fixed; bottom: 85px; left: 20px; z-index: 99999;
+        padding: 12px; font-size: 13px; font-family: monospace;
+        background-color: rgba(10, 11, 15, 0.98); color: #fff;
+        border: 1px solid #444; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.7);
+        display: none; min-width: 400px; max-height: 250px; overflow-y: auto;
+    `;
+    document.body.appendChild(statusBox);
+
+    const btn = document.createElement('button');
+    btn.id = 'autopilot-btn';
+    btn.innerText = '▶ Start Autopilot (v6.1.5)';
+    btn.style.cssText = `
+        position: fixed; bottom: 20px; left: 20px; z-index: 99999;
+        padding: 15px 25px; font-size: 16px; font-weight: bold;
+        background-color: #2e7d32; color: white; border: none;
+        border-radius: 5px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    `;
+
+    btn.addEventListener('click', () => {
+        window.autopilotRunning = !window.autopilotRunning;
+        updateUIButton();
+        if (window.autopilotRunning) {
+            document.getElementById('autopilot-status').style.display = 'block';
+            runAutopilot();
+        } else {
+            setStatus('⏹ Interrupted execution chain manually.', 'warning');
+        }
+    });
+
+    document.body.appendChild(btn);
+}
+
+function setStatus(message, type = 'info') {
+    const box = document.getElementById('autopilot-status');
+    if (!box) return;
+
+    const colorMap = { success: '#81c784', error: '#e57373', warning: '#fff176' };
+    const color = colorMap[type] || '#ffffff';
+
+    const line = document.createElement('div');
+    line.style.cssText = `color: ${color}; margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px;`;
+    line.innerText = message;
+
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+}
+
+function clearStatus() {
+    const box = document.getElementById('autopilot-status');
+    if (box) {
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.1.5):</div>";
+    }
+}
+
+function updateUIButton() {
+    const btn = document.getElementById('autopilot-btn');
+    if (!btn) return;
+    if (window.autopilotRunning) {
+        btn.innerText = '⏹ STOP Autopilot';
+        btn.style.backgroundColor = '#c62828';
+    } else {
+        btn.innerText = '▶ Start Autopilot (v6.1.5)';
+        btn.style.backgroundColor = '#2e7d32';
+    }
+}
+
+injectControlPanel();
 
 })();
