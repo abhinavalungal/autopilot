@@ -1,22 +1,29 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v6.1.6
-//   Changes from v6.1.5:
+//   MARITIME REPORT AUTOPILOT — v6.1.8
+//   Changes from v6.1.6:
 //
+//   CHANGE I — Smarter duplicate handling.
+//     When a duplicate is detected, the matched report's card colour is
+//     inspected.  If the matched report is already REJECTED (red card),
+//     the duplicate flag is ignored and the current report is validated
+//     and approved normally.  Only non-rejected duplicates still trigger
+//     the automatic rejection flow.
+//     Result: Report A = Rejected ❌  →  Report B = Approved ✅
+//
+//   CHANGE J — Strict sequential navigation; no more skipping.
+//     goToNextPendingReport() now moves exactly one step in sidebar order
+//     (currentIndex − 1) instead of hunting for the nearest pending card.
+//     This guarantees every date in the queue is visited in sequence.
+//     A DATE GAP WARNING is emitted whenever the next card's date is not
+//     adjacent to the current card's date (missing reports detected).
+//
+//   Inherited from v6.1.6:
 //   CHANGE H — Approved DRIFTING for In Port / Arrival / Departure contexts.
-//
-//   Changes from v6.1.4:
-//
 //   CHANGE G — Removed cross-report ROB continuity/reconciliation checks.
-//     Bunker validation now only checks the current report:
-//       - Last ROB must equal ROB Start
-//
-//   Inherited from v6.1.4:
 //   FIX F — ROB End capture in scrapeBunkerSnapshot().
-//   Inherited from v6.1.3:
 //   FIX C — Validation no longer navigates while running.
 //   FIX D — Approve-popup Yes button retry/waitForDOMStable resilience.
 //   FIX E — ensureOnCurrentReport() guard before approval.
-//   Inherited from v6.1.2:
 //   FIX A — Approve button never clicks (p-confirm-popup-accept /
 //            aria-label="Yes" selectors).
 //   FIX B — ROB End is kept distinct from ROB Start in scrapeBunkerSnapshot.
@@ -253,6 +260,36 @@ function isCardChecked(card) {
     return isGreenish(style.borderColor) || isGreenish(style.backgroundColor);
 }
 
+function isRejectedCard(card) {
+    if (!card) return false;
+    const style = window.getComputedStyle(card);
+
+    // ── Layer 1: background colour
+    //    Threshold lowered to 20 — light-pink rejected cards
+    //    (e.g. Bootstrap danger-subtle rgb(248,215,218), PrimeNG rose-tint)
+    //    have r−g as low as 25–33, well below the old threshold of 40.
+    const bgRgb = parseRgb(style.backgroundColor);
+    if (bgRgb) {
+        const { r, g, b } = bgRgb;
+        if ((r - g) > 20 && (r - b) > 20 && r > 160) return true;
+    }
+
+    // ── Layer 2: border colour (some designs only apply a red border)
+    const brRgb = parseRgb(style.borderColor) || parseRgb(style.borderLeftColor);
+    if (brRgb) {
+        const { r, g, b } = brRgb;
+        if ((r - g) > 40 && (r - b) > 40 && r > 150) return true;
+    }
+
+    // ── Layer 3: text badge — look for a "Rejected" status label inside card
+    const hasRejectedBadge = Array.from(
+        card.querySelectorAll('.p-tag, .p-badge, [class*="status"], [class*="badge"], span, div')
+    ).some(el => (el.innerText || '').trim().toLowerCase() === 'rejected');
+    if (hasRejectedBadge) return true;
+
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 //   DUPLICATE TIMELINE SCANNER
 // ---------------------------------------------------------------------------
@@ -396,7 +433,7 @@ function checkIsDuplicateReport() {
         if (card === currentCard) continue;
         const sig = extractCardSignature(card);
         if (signaturesMatch(currentSig, sig)) {
-            return { currentSig, matchedSig: sig };
+            return { currentSig, matchedSig: sig, matchedCard: card };
         }
     }
 
@@ -1464,7 +1501,7 @@ async function ensureOnCurrentReport(currentSig, fallbackCard) {
 
 async function validateCurrentReport(crossReportData) {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v6.1.6)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v6.1.8)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     if (isCurrentReportAlreadyApproved()) {
@@ -1479,22 +1516,30 @@ async function validateCurrentReport(crossReportData) {
     setStatus('Scanning timeline matrix for concurrent duplicates...', 'info');
     const duplicateMatch = checkIsDuplicateReport();
     if (duplicateMatch) {
-        const { currentSig, matchedSig } = duplicateMatch;
-        setStatus('🛑 LOCKOUT: Duplicate report detected.', 'error');
-        setStatus(`   Current report:  ${describeSignature(currentSig)}`, 'error');
-        setStatus(`   Matches existing report:  ${describeSignature(matchedSig)}`, 'error');
+        const { currentSig, matchedSig, matchedCard } = duplicateMatch;
 
-        const rejectionMessage =
-            `Duplicate Report Detected: this report (${describeSignature(currentSig)}) ` +
-            `matches an existing report already on file (${describeSignature(matchedSig)}).`;
-
-        const rejected = await rejectReportAsDuplicate(rejectionMessage);
-        if (rejected) {
-            setStatus('✅ Report rejected automatically with duplicate explanation. Halted for review.', 'warning');
+        if (isRejectedCard(matchedCard)) {
+            // The matched report is already rejected (red) — safe to approve this one
+            setStatus('ℹ️ Duplicate detected but matched report is already REJECTED — ignoring duplicate flag and continuing validation.', 'info');
+            setStatus(`   Current report: ${describeSignature(currentSig)}`, 'info');
+            setStatus(`   Matched (already rejected): ${describeSignature(matchedSig)}`, 'info');
         } else {
-            setStatus('⚠️ Could not complete automatic rejection — manual review required. Halted.', 'error');
+            setStatus('🛑 LOCKOUT: Duplicate report detected.', 'error');
+            setStatus(`   Current report:  ${describeSignature(currentSig)}`, 'error');
+            setStatus(`   Matches existing report:  ${describeSignature(matchedSig)}`, 'error');
+
+            const rejectionMessage =
+                `Duplicate Report Detected: this report (${describeSignature(currentSig)}) ` +
+                `matches an existing report already on file (${describeSignature(matchedSig)}).`;
+
+            const rejected = await rejectReportAsDuplicate(rejectionMessage);
+            if (rejected) {
+                setStatus('✅ Report rejected automatically with duplicate explanation. Halted for review.', 'warning');
+            } else {
+                setStatus('⚠️ Could not complete automatic rejection — manual review required. Halted.', 'error');
+            }
+            return false;
         }
-        return false;
     } else {
         setStatus('✅ Duplicate Scan: No matching duplicate found in the report list.', 'success');
     }
@@ -1922,11 +1967,18 @@ async function rejectReportAsDuplicate(rejectionMessage) {
 }
 
 // ---------------------------------------------------------------------------
-//   NAVIGATION
+//   NAVIGATION  (v6.1.8 — strict sequential, never skips, warns on date gaps)
 // ---------------------------------------------------------------------------
 
+function extractDateFromSig(sig) {
+    // Return a Date object from a card signature, or null if unparseable
+    if (!sig || !sig.date) return null;
+    const d = new Date(sig.date + 'T' + (sig.time || '00:00') + ':00' + (sig.utcOffset || '+00:00'));
+    return isNaN(d.getTime()) ? null : d;
+}
+
 async function goToNextPendingReport() {
-    setStatus('Analyzing sidebar tracker matrix...', 'info');
+    setStatus('Analyzing sidebar tracker matrix (sequential mode)...', 'info');
 
     const sidebarCards = queryAllContexts('.card, div[class*="card"]').filter(card => {
         const text = card.innerText || '';
@@ -1938,42 +1990,94 @@ async function goToNextPendingReport() {
         return false;
     }
 
-    const isPending = card => {
-        const bgColor = window.getComputedStyle(card).backgroundColor;
-        return (
-            bgColor === 'rgb(255, 255, 255)' ||
-            bgColor === 'rgba(0, 0, 0, 0)' ||
-            bgColor === 'transparent'
-        );
-    };
+    // ── Locate the current (active/selected) card ─────────────────────────
+    const ACTIVE_CLASSES = ['active', 'p-highlight', 'selected', 'is-selected',
+                            'current', 'focused', 'open', 'p-listbox-item-selected'];
 
-    const isActive = card =>
-        card.classList.contains('active') ||
-        card.classList.contains('p-highlight') ||
-        card.classList.contains('selected') ||
-        !isPending(card);
+    let currentCard = null;
 
-    const currentIndex = sidebarCards.findIndex(isActive);
-
-    const searchFrom = currentIndex >= 0 ? currentIndex - 1 : sidebarCards.length - 1;
-    let nextPendingCard = null;
-
-    for (let i = searchFrom; i >= 0; i--) {
-        if (isPending(sidebarCards[i])) {
-            nextPendingCard = sidebarCards[i];
+    for (const card of sidebarCards) {
+        if (ACTIVE_CLASSES.some(cls => card.classList.contains(cls))) {
+            currentCard = card;
             break;
         }
     }
+    if (!currentCard) {
+        for (const card of sidebarCards) {
+            if (card.getAttribute('aria-selected') === 'true') {
+                currentCard = card;
+                break;
+            }
+        }
+    }
+    if (!currentCard) {
+        for (const card of sidebarCards) {
+            const style = window.getComputedStyle(card);
+            if (
+                isBlueish(style.borderColor) ||
+                isBlueish(style.outlineColor) ||
+                isBlueish(style.boxShadow)
+            ) {
+                currentCard = card;
+                break;
+            }
+        }
+    }
+    if (!currentCard) {
+        // Fall back to the first card that is not white/transparent
+        const isPending = card => {
+            const bg = window.getComputedStyle(card).backgroundColor;
+            return bg === 'rgb(255, 255, 255)' || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent';
+        };
+        currentCard = sidebarCards.find(c => !isPending(c)) || sidebarCards[0];
+    }
 
-    if (nextPendingCard) {
-        setStatus('➡️ Transitioning interface context to next data index line...', 'success');
-        nextPendingCard.click();
-        await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
-        return true;
-    } else {
-        setStatus('🎉 No pending reports ahead. Autopilot stopped — all reports ahead have been approved.', 'success');
+    const currentIndex = sidebarCards.indexOf(currentCard);
+
+    // ── Step exactly one position in sidebar order ─────────────────────────
+    // Sidebar is ordered newest → oldest (index 0 = newest).
+    // Processing goes newest-first, so the next card is at currentIndex - 1.
+    const nextIndex = currentIndex - 1;
+
+    if (nextIndex < 0) {
+        setStatus('🎉 No more reports in the queue. Autopilot complete.', 'success');
         return false;
     }
+
+    const nextCard = sidebarCards[nextIndex];
+
+    // ── Missing-date gap warning ───────────────────────────────────────────
+    const currentSig = extractCardSignature(currentCard);
+    const nextSig    = extractCardSignature(nextCard);
+    const currentDt  = extractDateFromSig(currentSig);
+    const nextDt     = extractDateFromSig(nextSig);
+
+    if (currentDt && nextDt) {
+        const gapMs   = currentDt.getTime() - nextDt.getTime(); // next is older → positive gap
+        const gapDays = Math.round(gapMs / (1000 * 60 * 60 * 24));
+
+        if (gapDays > 1) {
+            setStatus(
+                `⚠️ DATE GAP WARNING: ${gapDays - 1} date(s) missing between ` +
+                `${nextSig.date} and ${currentSig.date}. ` +
+                `Expected reports may be absent from the queue.`,
+                'warning'
+            );
+        } else if (gapDays < 0) {
+            setStatus(
+                `⚠️ DATE ORDER WARNING: Next card (${nextSig.date}) appears newer than current (${currentSig.date}). ` +
+                `Sidebar order may be unexpected.`,
+                'warning'
+            );
+        }
+    } else if (!nextSig.date) {
+        setStatus('⚠️ DATE WARNING: Next report card has no readable date — cannot verify sequence continuity.', 'warning');
+    }
+
+    setStatus('➡️ Moving to next report in sidebar sequence...', 'success');
+    nextCard.click();
+    await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -2005,11 +2109,33 @@ function isCurrentReportAlreadyApproved() {
     );
 }
 
+function isCurrentReportAlreadyRejected() {
+    // Checks the main content area (not sidebar cards) for a "Rejected" badge/tag.
+    return queryAllContexts(
+        '.p-tag, .p-badge, [class*="rejected"], [class*="status"]'
+    ).some(el => {
+        // Ignore badges that belong to a sidebar card
+        if (el.closest('.card, [class*="card"], .report-item, li[class*="report"]')) return false;
+        return (el.innerText || '').trim().toLowerCase() === 'rejected';
+    });
+}
+
 async function runAutopilot() {
     try {
         while (window.autopilotRunning) {
             if (isCurrentReportAlreadyApproved()) {
                 setStatus('⚠️ Current report already approved. Looking for next pending report...', 'warning');
+                const hasNext = await goToNextPendingReport();
+                if (!hasNext) {
+                    window.autopilotRunning = false;
+                    updateUIButton();
+                    break;
+                }
+                continue;
+            }
+
+            if (isCurrentReportAlreadyRejected()) {
+                setStatus('⚠️ Current report is already rejected — skipping to next report.', 'warning');
                 const hasNext = await goToNextPendingReport();
                 if (!hasNext) {
                     window.autopilotRunning = false;
@@ -2095,7 +2221,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v6.1.6)';
+    btn.innerText = '▶ Start Autopilot (v6.1.8)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -2135,7 +2261,7 @@ function setStatus(message, type = 'info') {
 function clearStatus() {
     const box = document.getElementById('autopilot-status');
     if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.1.6):</div>";
+        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.1.8):</div>";
     }
 }
 
@@ -2146,8 +2272,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v6.1.6)';
-        btn.style.backgroundColor = '#2e7d32';
+        btn.innerText = '▶ Start Autopilot (v6.1.8)';
     }
 }
 
