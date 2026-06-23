@@ -7,7 +7,7 @@
 //   and Arrival/Departure records):
 //
 //   PERF-1 — CP / Ordered Speed vs Reported Speed tolerance check.
-//     Reported Speed must be within ±0.5 knots of CP / Ordered Speed.
+//     Reported Speed must be within ±0.85 knots of CP / Ordered Speed.
 //     Records outside the allowed range are flagged and blocked.
 //
 //   PERF-2 — Average KW minimum digit check.
@@ -21,6 +21,10 @@
 //   PERF-4 — Engine Distance non-zero check.
 //     Engine Distance (nm) must not be 0.
 //     Any record where Engine Distance equals 0 is flagged and blocked.
+//
+//   PERF-5 — Bunker ROB ADJ column zero check.
+//     The ADJ value for every fuel row in the Bunker ROB table must be 0.
+//     Any non-zero ADJ value is flagged and blocks approval.
 //
 //   All PERF validations use the same error highlighting as v6.1.8
 //   (red border + red background on the offending input field).
@@ -1588,7 +1592,7 @@ function validatePerformanceAtSea() {
         return null;
     }
 
-    // ── PERF-1: CP / Ordered Speed vs Reported Speed (±0.5 knot tolerance) ──
+    // ── PERF-1: CP / Ordered Speed vs Reported Speed (±0.85 knot tolerance) ──
     setStatus('PERF-1: Checking CP / Ordered Speed vs Reported Speed...', 'info');
     const cpSpeedInput = findInputByAttr(['cpspeed', 'orderedspeed', 'cp_speed', 'cp/speed'])
         || findInputByLabel(['cp / ordered speed', 'cp/ordered speed', 'ordered speed (knots)', 'cp speed']);
@@ -1600,22 +1604,21 @@ function validatePerformanceAtSea() {
         const reportedSpeed = parseFloat(reportedSpeedInput.value);
 
         if (!isNaN(cpSpeed) && !isNaN(reportedSpeed)) {
-            const diff = Math.abs(reportedSpeed - cpSpeed);
-            const minAllowed = cpSpeed;
-            const maxAllowed = cpSpeed + 0.5;
+            const minAllowed = cpSpeed - 0.85;
+            const maxAllowed = cpSpeed + 0.85;
 
             if (reportedSpeed < minAllowed || reportedSpeed > maxAllowed) {
-                const msg = `PERF-1 Speed Deviation: CP / Ordered Speed = ${cpSpeed} kn, Reported Speed = ${reportedSpeed} kn — allowed range is ${minAllowed.toFixed(2)}–${maxAllowed.toFixed(2)} kn (±0.5).`;
+                const msg = `PERF-1 Speed Deviation: CP / Ordered Speed = ${cpSpeed} kn, Reported Speed = ${reportedSpeed} kn — allowed range is ${minAllowed.toFixed(2)}–${maxAllowed.toFixed(2)} kn (±0.85).`;
                 result.errors.push(msg);
                 result.isValid = false;
                 cpSpeedInput.style.cssText       = FIELD_STYLES.ERROR_HEX_FULL;
                 reportedSpeedInput.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
-                scrollToIssueElement(reportedSpeedInput, 'Reported Speed is outside the ±0.5 tolerance of CP / Ordered Speed.');
+                scrollToIssueElement(reportedSpeedInput, 'Reported Speed is outside the ±0.85 tolerance of CP / Ordered Speed.');
                 setStatus(`❌ PERF-1 FAIL: Reported Speed (${reportedSpeed}) is outside [${minAllowed.toFixed(2)}–${maxAllowed.toFixed(2)}] for CP Speed ${cpSpeed}.`, 'error');
             } else {
                 cpSpeedInput.style.cssText       = FIELD_STYLES.SUCCESS_FULL;
                 reportedSpeedInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
-                setStatus(`✅ PERF-1 PASS: Reported Speed (${reportedSpeed}) within tolerance of CP Speed (${cpSpeed}).`, 'success');
+                setStatus(`✅ PERF-1 PASS: Reported Speed (${reportedSpeed}) within ±0.85 tolerance of CP Speed (${cpSpeed}).`, 'success');
             }
         } else {
             setStatus('⚠️ PERF-1: Could not parse CP Speed or Reported Speed — skipping tolerance check.', 'warning');
@@ -1700,6 +1703,47 @@ function validatePerformanceAtSea() {
         }
     } else {
         setStatus('⚠️ PERF-4: Engine Distance field not found on this form layout.', 'warning');
+    }
+
+    // ── PERF-5: Bunker ROB ADJ column — must be 0 on every row ──────────────
+    //   Reuses the already-existing scrapeBunkerSnapshot() scraper which
+    //   captures the adj value and adjElementToHighlight for each fuel row.
+    setStatus('PERF-5: Checking Bunker ROB ADJ column — all rows must be 0...', 'info');
+    const bunkerSnap = scrapeBunkerSnapshot();
+    if (bunkerSnap.length === 0) {
+        setStatus('⚠️ PERF-5: Bunker ROB table not found or returned no rows — skipping ADJ check.', 'warning');
+    } else {
+        let adjFailed = false;
+        bunkerSnap.forEach(row => {
+            // Skip rows where both lastRob and robStart are null (empty / not-carried fuel)
+            if (row.lastRob === null && row.robStart === null) return;
+
+            const adjVal = row.adj;  // numeric value captured by scrapeBunkerSnapshot()
+            if (adjVal !== null && adjVal !== 0 && Math.abs(adjVal) > CONFIG.ADJ_TOLERANCE) {
+                const msg = `PERF-5 ADJ Non-Zero [${row.displayLabel}]: ADJ = ${adjVal} — must be 0 for all fuel rows.`;
+                result.errors.push(msg);
+                result.isValid = false;
+                adjFailed = true;
+
+                // Highlight the ADJ cell/input using the element captured by the scraper
+                const adjEl = row.adjElementToHighlight || row.adjInput;
+                if (adjEl) {
+                    adjEl.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+                    scrollToIssueElement(adjEl, `Bunker ADJ is non-zero in row [${row.displayLabel}].`);
+                }
+                setStatus(`❌ PERF-5 FAIL: ADJ = ${adjVal} in row [${row.displayLabel}] — must be 0.`, 'error');
+            } else {
+                const adjEl = row.adjElementToHighlight || row.adjInput;
+                if (adjEl) adjEl.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+                setStatus(`✅ PERF-5 PASS: ADJ = 0 in row [${row.displayLabel}].`, 'success');
+            }
+        });
+
+        if (!adjFailed) {
+            setStatus('✅ PERF-5: All Bunker ROB ADJ values are 0.', 'success');
+        } else {
+            setStatus('🛑 PERF-5: Non-zero ADJ detected in Bunker ROB table — halting.', 'error');
+        }
     }
 
     return result;
