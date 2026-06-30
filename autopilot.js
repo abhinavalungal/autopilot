@@ -1,32 +1,49 @@
 // =========================================================================
-//   MARITIME REPORT AUTOPILOT — v6.1.8
-//   Changes from v6.1.6:
+//   MARITIME REPORT AUTOPILOT — v7.0.3
 //
-//   CHANGE I — Smarter duplicate handling.
-//     When a duplicate is detected, the matched report's card colour is
-//     inspected.  If the matched report is already REJECTED (red card),
-//     the duplicate flag is ignored and the current report is validated
-//     and approved normally.  Only non-rejected duplicates still trigger
-//     the automatic rejection flow.
-//     Result: Report A = Rejected ❌  →  Report B = Approved ✅
+//   v7.0.3 changes:
+//     - ADJ must always be 0. Any non-zero ADJ value (positive or negative,
+//       e.g. -1) in the Bunker ROB grid now blocks approval as a hard
+//       error, with the offending ADJ field highlighted red and scrolled
+//       into view, same as the existing Last ROB / ROB Start checks.
 //
-//   CHANGE J — Strict sequential navigation; no more skipping.
-//     goToNextPendingReport() now moves exactly one step in sidebar order
-//     (currentIndex − 1) instead of hunting for the nearest pending card.
-//     This guarantees every date in the queue is visited in sequence.
-//     A DATE GAP WARNING is emitted whenever the next card's date is not
-//     adjacent to the current card's date (missing reports detected).
+//   v7.0.2 changes:
+//     - Fixed close-button placement: it was absolutely positioned inside
+//       the same scrollable element as the log lines, so it scrolled out
+//       of view as the log grew (appeared "stuck" near the bottom). The
+//       log panel is now a fixed (non-scrolling) header bar — title left,
+//       red × close button top-right — with a separately-scrolling content
+//       area underneath. The button never moves regardless of log length.
+//     - The "Errors detected in the submitted data" hard-error modal is now
+//       detected in two places: immediately after clicking Approve (this
+//       modal has no Yes/Proceed button of its own), and after the Yes
+//       confirmation click. Either match stops Autopilot outright.
+//     - extractWarningDialogMessages() now also reads dialog headings/
+//       titles, not just <p>/<li> text, so a modal whose error text is the
+//       title itself (as in "Errors detected in the submitted data") is
+//       still picked up.
 //
-//   Inherited from v6.1.6:
-//   CHANGE H — Approved DRIFTING for In Port / Arrival / Departure contexts.
-//   CHANGE G — Removed cross-report ROB continuity/reconciliation checks.
-//   FIX F — ROB End capture in scrapeBunkerSnapshot().
-//   FIX C — Validation no longer navigates while running.
-//   FIX D — Approve-popup Yes button retry/waitForDOMStable resilience.
-//   FIX E — ensureOnCurrentReport() guard before approval.
-//   FIX A — Approve button never clicks (p-confirm-popup-accept /
-//            aria-label="Yes" selectors).
-//   FIX B — ROB End is kept distinct from ROB Start in scrapeBunkerSnapshot.
+//   v7.0.1: version bump only (re-tag for cache-busting / deployment
+//   verification — confirms the close-button repositioning and the fatal
+//   "errors detected in the submitted data" hard-stop from v7.0.0 are
+//   live). No functional changes beyond v7.0.0.
+//
+//   v7.0.0 changes:
+//     - Warning-dialog interceptor now reads the actual warning text list
+//       (not just report context) and bypasses only known-safe warnings:
+//       "Confirm if the incinerator value is correct" and
+//       "Report time cannot be less than vessel activation date" (plus the
+//       existing Observed-Distance-0-in-Port-context bypass). Any other
+//       warning text still causes a hard LOCKOUT.
+//     - Close (×) button added to the SYSTEM ACTIVE LOG panel.
+//     - Post-approval guard: if a report is approved but its sidebar card
+//       is not green (i.e. not actually confirmed approved), Autopilot
+//       automatically returns to that report and re-runs the approval flow.
+//     - New validation checks: sequential date verification, reporting
+//       period limits (1-25 hrs between reports), voyage continuity
+//       (sidebar), observed-distance-vs-fuel-consumption logic, and event
+//       block fuel ROB validation (ROB Start = ROB End where applicable,
+//       and at least one fuel type ROB value must not be blank).
 // =========================================================================
 
 (function () {
@@ -49,6 +66,30 @@ const CONFIG = {
     DOM_STABLE_DEBOUNCE_MS: 200,
     YES_BTN_RETRY_COUNT: 3,
     YES_BTN_RETRY_DELAY_MS: 300,
+
+    // v7.0.3: reporting period validity window (Validation Check #2)
+    REPORT_INTERVAL_MIN_HOURS: 1,
+    REPORT_INTERVAL_MAX_HOURS: 25,
+
+    // v7.0.3: warning text fragments (lowercase) that Autopilot is allowed
+    // to bypass via "Proceed Anyway" regardless of report context.
+    ALWAYS_BYPASS_WARNING_PHRASES: [
+        'incinerator value is correct',
+        'cannot be less than vessel activation date'
+    ],
+
+    // v7.0.3: warning text fragments that are only safe to bypass when the
+    // current report is an In Port Report (legacy v6.x behavior).
+    PORT_CONTEXT_BYPASS_WARNING_PHRASES: [
+        'observed distance is 0'
+    ],
+
+    // v7.0.3: warning text fragments that indicate a hard data error rather
+    // than a bypassable advisory — Autopilot must stop entirely, not just
+    // skip this report, when one of these appears.
+    FATAL_WARNING_PHRASES: [
+        'errors detected in the submitted data'
+    ],
 
     APPROVED_PORT_EVENTS: [
         'IDLE IN PORT',
@@ -604,6 +645,110 @@ function scrapeTimelineEventRows() {
 }
 
 // ---------------------------------------------------------------------------
+//   EVENT BLOCK FUEL ROB VALIDATION  (v7.0.3 — Validation Check #5)
+//
+//   Reads the per-fuel-type ROB Start / ROB End sub-grid that appears
+//   beneath an Events row (see EVENTS fieldset). Confirms:
+//     - ROB Start = ROB End for any fuel type with no recorded consumption.
+//     - At least one fuel type has a non-blank ROB value when an event
+//       is present (an event must not be saved with all-blank ROB rows).
+// ---------------------------------------------------------------------------
+
+function scrapeEventFuelRows() {
+    const fuelRows = [];
+
+    for (const ctx of getAllContexts()) {
+        if (!ctx) continue;
+
+        const eventContainers = Array.from(ctx.querySelectorAll('fieldset'));
+        let targetEventsBlock = null;
+        for (const fc of eventContainers) {
+            const legend = fc.querySelector('legend');
+            if (legend && legend.innerText.toUpperCase().includes('EVENTS')) {
+                targetEventsBlock = fc;
+                break;
+            }
+        }
+        if (!targetEventsBlock) continue;
+
+        const headerRow = Array.from(targetEventsBlock.querySelectorAll('tr')).find(tr => {
+            const txt = (tr.innerText || '').toUpperCase();
+            return txt.includes('ROB START') && txt.includes('ROB END');
+        });
+        if (!headerRow) continue;
+
+        const headerCells = Array.from(headerRow.querySelectorAll('th, td')).map(c => (c.innerText || '').trim().toUpperCase());
+        const robStartCol = headerCells.findIndex(t => t.includes('ROB START'));
+        const robEndCol   = headerCells.findIndex(t => t.includes('ROB END'));
+        if (robStartCol < 0 || robEndCol < 0) continue;
+
+        let dataRows = [];
+        const table = headerRow.closest('table') || targetEventsBlock;
+        const allRows = Array.from(table.querySelectorAll('tr'));
+        const headerIdx = allRows.indexOf(headerRow);
+        if (headerIdx >= 0) dataRows = allRows.slice(headerIdx + 1);
+
+        dataRows.forEach(tr => {
+            const cells = Array.from(tr.querySelectorAll('td, th'));
+            if (cells.length === 0) return;
+            const fuelTypeLabel = (cells[0].innerText || '').trim();
+            if (!fuelTypeLabel) return;
+
+            const getVal = (colIdx) => {
+                const cell = cells[colIdx];
+                if (!cell) return null;
+                const inp = cell.querySelector('input');
+                const raw = inp ? inp.value : (cell.innerText || '');
+                const trimmed = (raw || '').trim();
+                if (trimmed === '') return null;
+                const v = parseFloat(trimmed);
+                return isNaN(v) ? null : v;
+            };
+
+            const robStart = getVal(robStartCol);
+            const robEnd   = getVal(robEndCol);
+
+            const hasConsumption = Array.from(tr.querySelectorAll('input')).some((inp, i) => {
+                if (i <= Math.max(robStartCol, robEndCol)) return false;
+                const v = parseFloat(inp.value);
+                return !isNaN(v) && v > 0;
+            });
+
+            fuelRows.push({ fuelType: fuelTypeLabel, robStart, robEnd, hasConsumption });
+        });
+    }
+
+    return fuelRows;
+}
+
+function validateEventFuelBlock(fuelRows) {
+    const result = { errors: [], warnings: [] };
+    if (!fuelRows || fuelRows.length === 0) return result;
+
+    let anyFilled = false;
+    fuelRows.forEach(fr => {
+        if (fr.robStart !== null || fr.robEnd !== null) anyFilled = true;
+
+        if (fr.robStart !== null && fr.robEnd !== null &&
+            Math.abs(fr.robStart - fr.robEnd) > CONFIG.ADJ_TOLERANCE && !fr.hasConsumption) {
+            result.errors.push(
+                `Event Fuel ROB Mismatch [${fr.fuelType}]: ROB Start (${fr.robStart}) ≠ ROB End (${fr.robEnd}) ` +
+                `with no recorded consumption against this fuel type.`
+            );
+        }
+    });
+
+    if (!anyFilled) {
+        result.errors.push(
+            'Event Block Validation: an event is present but every fuel type ROB value is blank — ' +
+            'at least one fuel type must have a ROB value recorded before the event can be saved.'
+        );
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 //   EVENTS BLOCK VALIDATOR
 // ---------------------------------------------------------------------------
 
@@ -846,6 +991,125 @@ function reportTimestamp(sig) {
     if (!sig || !sig.date || !sig.time) return NaN;
     const offset = sig.utcOffset || '+00:00';
     return new Date(`${sig.date}T${sig.time}:00${offset}`).getTime();
+}
+
+// ---------------------------------------------------------------------------
+//   VOYAGE / SEQUENCE / DISTANCE VALIDATION  (v7.0.3)
+//
+//   Validation Checks implemented here:
+//     1. Sequential Date Verification  — current report time must be later
+//        than the previous report's time.
+//     2. Reporting Period Limits        — interval between reports must be
+//        within REPORT_INTERVAL_MIN_HOURS .. REPORT_INTERVAL_MAX_HOURS.
+//     3. Voyage Continuity (Sidebar)    — voyage numbers must not skip or
+//        go backwards between adjacent same-vessel reports.
+//     4. Distance Logic                 — observed distance of 0 combined
+//        with non-zero fuel consumption is flagged as suspicious.
+// ---------------------------------------------------------------------------
+
+function extractVoyageNumber(sig) {
+    if (!sig || !sig.routeInfo) return null;
+    const m = sig.routeInfo.match(/VOY\.?\s*(\d+)/i);
+    return m ? parseInt(m[1], 10) : null;
+}
+
+function runSequenceAndContinuityChecks(crossReportData) {
+    const result = { errors: [], warnings: [] };
+    const { sidebarCards, currentSig, currentCard } = crossReportData || {};
+    if (!currentSig || !sidebarCards || sidebarCards.length === 0) return result;
+
+    const { previousCard } = findAdjacentVesselReports(currentSig, sidebarCards, currentCard);
+    if (!previousCard) return result;
+
+    const prevSig = extractCardSignature(previousCard);
+    const currTs  = reportTimestamp(currentSig);
+    const prevTs  = reportTimestamp(prevSig);
+
+    if (!isNaN(currTs) && !isNaN(prevTs)) {
+        // 1. Sequential Date Verification
+        if (currTs <= prevTs) {
+            result.errors.push(
+                `Sequential Date Violation: current report (${currentSig.date} ${currentSig.time}) is not ` +
+                `later than the previous report (${prevSig.date} ${prevSig.time}).`
+            );
+        } else {
+            // 2. Reporting Period Limits
+            const hoursDiff = (currTs - prevTs) / (1000 * 60 * 60);
+            if (hoursDiff < CONFIG.REPORT_INTERVAL_MIN_HOURS) {
+                result.errors.push(
+                    `Reporting Period Violation: interval since previous report is only ${hoursDiff.toFixed(2)} hrs ` +
+                    `(minimum ${CONFIG.REPORT_INTERVAL_MIN_HOURS} hr) — possible duplicate or misdated report.`
+                );
+            } else if (hoursDiff > CONFIG.REPORT_INTERVAL_MAX_HOURS) {
+                result.errors.push(
+                    `Reporting Period Violation: interval since previous report is ${hoursDiff.toFixed(2)} hrs, ` +
+                    `exceeding the maximum allowed ${CONFIG.REPORT_INTERVAL_MAX_HOURS} hrs — a report may be missing.`
+                );
+            }
+        }
+    }
+
+    // 3. Voyage Continuity (Sidebar)
+    const currVoy = extractVoyageNumber(currentSig);
+    const prevVoy = extractVoyageNumber(prevSig);
+    if (currVoy !== null && prevVoy !== null && currVoy !== prevVoy) {
+        const diff = currVoy - prevVoy;
+        if (diff > 1) {
+            result.warnings.push(
+                `Voyage Continuity Gap: sidebar jumps from Voy ${prevVoy} to Voy ${currVoy} — ` +
+                `intermediate voyage report(s) may be missing.`
+            );
+        } else if (diff < 0) {
+            result.warnings.push(
+                `Voyage Continuity Anomaly: voyage number decreased from ${prevVoy} to ${currVoy}.`
+            );
+        }
+    }
+
+    return result;
+}
+
+function checkDistanceVsFuelLogic() {
+    const result = { errors: [], warnings: [] };
+
+    let observedDistance = null;
+    const labelEls = queryAllContexts('label, span, div, th, .field-label, .p-column-title');
+    for (const lbl of labelEls) {
+        const txt = (lbl.innerText || '').trim().toLowerCase();
+        if (txt === 'observed distance' || txt.startsWith('observed distance')) {
+            const container = lbl.closest('.p-field, .field-group, tr, .form-row, fieldset') || lbl.parentElement;
+            const inp = container ? container.querySelector('input') : null;
+            if (inp && inp.value.trim() !== '') {
+                observedDistance = parseFloat(inp.value) || 0;
+                break;
+            }
+        }
+    }
+
+    if (observedDistance === null || observedDistance > 0) return result;
+
+    // Distance is 0 — check whether any fuel was consumed in the bunker ROB table.
+    const bunkerRows = locateBunkerRows();
+    let totalConsumed = 0;
+    bunkerRows.forEach(row => {
+        const robStartInp = row.querySelector('input');
+        const cells = Array.from(row.querySelectorAll('input'));
+        cells.forEach(inp => {
+            const titleText = (inp.getAttribute('placeholder') || inp.id || inp.name || '').toLowerCase();
+            if (titleText.includes('total') || titleText.includes('cons')) {
+                totalConsumed += parseFloat(inp.value) || 0;
+            }
+        });
+    });
+
+    if (totalConsumed > 0) {
+        result.warnings.push(
+            `Distance Logic Anomaly: Observed Distance = 0 nm but ${totalConsumed.toFixed(2)} MT of fuel was ` +
+            `reportedly consumed — vessel consumed fuel without recorded movement.`
+        );
+    }
+
+    return result;
 }
 
 function findAdjacentVesselReports(currentSig, sidebarCards, currentCard) {
@@ -1173,6 +1437,51 @@ function findOpenDialog() {
     return null;
 }
 
+// ---------------------------------------------------------------------------
+//   WARNING DIALOG MESSAGE READER  (v7.0.3)
+//
+//   Reads the individual warning lines from the "system found some warnings"
+//   confirmation popup (e.g. #validation-errors-dialog / .warnings-only) so
+//   the approval flow can decide, per-message, whether it is safe to bypass.
+// ---------------------------------------------------------------------------
+
+function extractWarningDialogMessages() {
+    const dialogSelectors = [
+        '#validation-errors-dialog',
+        '.warnings-only',
+        '[id*="validation-errors" i]',
+        '[class*="warnings-only" i]'
+    ];
+
+    let dialog = null;
+    for (const sel of dialogSelectors) {
+        const found = queryAllContexts(sel).find(el => {
+            const style = window.getComputedStyle(el);
+            return style.display !== 'none' && style.visibility !== 'hidden';
+        });
+        if (found) { dialog = found; break; }
+    }
+    if (!dialog) dialog = findOpenDialog();
+    if (!dialog) return [];
+
+    // v7.0.3: also capture heading/title text (h1-h4, .header, .title) so the
+    // hard-error modal's own title — e.g. "Errors detected in the submitted
+    // data" — is included and can be matched against FATAL_WARNING_PHRASES.
+    // The two known boilerplate lines from the soft-warnings popup are
+    // explicitly excluded so they don't get treated as warning content.
+    const items = Array.from(dialog.querySelectorAll(
+        'h1, h2, h3, h4, .header, .title, ul li, .warning-item, p'
+    ))
+        .map(el => (el.innerText || el.textContent || '').trim())
+        .filter(Boolean)
+        .filter(txt => !/^do you want to continue/i.test(txt))
+        .filter(txt => !/^the system found some warnings/i.test(txt))
+        .filter(txt => !/^please fix the highlighted errors/i.test(txt));
+
+    // De-duplicate (heading selectors can overlap with generic ones).
+    return Array.from(new Set(items));
+}
+
 function findActionButton(label, { matchVisibleText = false } = {}) {
     const lowerLabel = label.toLowerCase();
 
@@ -1475,6 +1784,42 @@ async function navigateBackToReport(targetSig, fallbackCard) {
 }
 
 // ---------------------------------------------------------------------------
+//   POST-APPROVAL GREEN-CHECK GUARD  (v7.0.3)
+//
+//   After approveReport() reports success, confirm the sidebar card for
+//   that report actually shows the green "approved" state. If it does not
+//   (e.g. the approval silently failed or only partially registered),
+//   navigate back to the report and re-run the approval flow once before
+//   giving up.
+// ---------------------------------------------------------------------------
+
+async function verifyApprovalAndRetry(targetSig, fallbackCard, attempt = 0) {
+    await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+    await waitForDOMStable();
+
+    const cards = getAllReportCards();
+    const matchedCard = cards.find(c => signaturesMatch(extractCardSignature(c), targetSig)) || fallbackCard;
+
+    if (matchedCard && isCardChecked(matchedCard)) {
+        setStatus('✅ Sidebar confirms approved status (card highlighted green).', 'success');
+        return true;
+    }
+
+    if (attempt >= 1) {
+        setStatus('❌ Sidebar still not green after retry — approval may not have registered. Halting for manual review.', 'error');
+        return false;
+    }
+
+    setStatus('⚠️ Sidebar card is not green after approval — returning to report and re-running approval...', 'warning');
+    await navigateBackToReport(targetSig, fallbackCard);
+
+    const reApproved = await approveReport();
+    if (reApproved === false) return false;
+
+    return verifyApprovalAndRetry(targetSig, fallbackCard, attempt + 1);
+}
+
+// ---------------------------------------------------------------------------
 //   ENSURE ON CURRENT REPORT (guard called before approval)
 // ---------------------------------------------------------------------------
 
@@ -1501,7 +1846,7 @@ async function ensureOnCurrentReport(currentSig, fallbackCard) {
 
 async function validateCurrentReport(crossReportData) {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v6.1.8)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v7.0.3)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     if (isCurrentReportAlreadyApproved()) {
@@ -1740,6 +2085,23 @@ async function validateCurrentReport(crossReportData) {
                 rowFailed = true;
             }
 
+            // ── ADJ MUST ALWAYS BE 0 ─────────────────────────────────────────
+            if (curr.adj !== null && Math.abs(curr.adj) > CONFIG.ADJ_TOLERANCE) {
+                const adjMsg = `[${curr.displayLabel}] ADJ value (${curr.adj}) is not zero. ADJ must always be 0 — no other value is permitted.`;
+                errors.push(adjMsg);
+                if (curr.adjInput) curr.adjInput.style.cssText = FIELD_STYLES.ERROR_KEYWORD_FULL;
+                setStatus(`❌ ADJ Violation [${curr.displayLabel}]: ADJ = ${curr.adj}, expected 0.`, 'error');
+                scrollToIssueElement(
+                    curr.adjInput,
+                    `Non-zero ADJ value found in row [${curr.displayLabel}].`
+                );
+                isValid = false;
+                withinReportFailed = true;
+                rowFailed = true;
+            } else if (curr.adjInput) {
+                curr.adjInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
+            }
+
             if (!rowFailed) {
                 if (curr.lastRobInput)  curr.lastRobInput.style.cssText  = FIELD_STYLES.SUCCESS_FULL;
                 if (curr.robStartInput) curr.robStartInput.style.cssText = FIELD_STYLES.SUCCESS_FULL;
@@ -1775,9 +2137,40 @@ async function validateCurrentReport(crossReportData) {
         timelineResult.warnings.forEach(warn => {
             setStatus(`⚠️ Timeline Notice: ${warn}`, 'warning');
         });
+
+        // v7.0.3 — Event Block Fuel ROB Validation (Check #5)
+        const fuelRows = scrapeEventFuelRows();
+        const fuelBlockResult = validateEventFuelBlock(fuelRows);
+        if (fuelBlockResult.errors.length > 0) {
+            isValid = false;
+            fuelBlockResult.errors.forEach(err => {
+                errors.push(`[Event Fuel Block] ${err}`);
+                setStatus(`🛑 Event Fuel Block Lockout: ${err}`, 'error');
+            });
+        } else if (fuelRows.length > 0) {
+            setStatus('✅ Event Fuel ROB Block: ROB integrity and non-blank check passed.', 'success');
+        }
     } else {
         setStatus('ℹ️ No active event grid objects extracted to check scenario state cascades.', 'info');
     }
+
+    // v7.0.3 — Sequential Date / Reporting Period / Voyage Continuity checks
+    setStatus('Running sequence, period, and voyage continuity checks...', 'info');
+    const sequenceResult = runSequenceAndContinuityChecks(crossReportData);
+    if (sequenceResult.errors.length > 0) {
+        isValid = false;
+        sequenceResult.errors.forEach(err => {
+            errors.push(`[Sequence] ${err}`);
+            setStatus(`🛑 Sequence Lockout: ${err}`, 'error');
+        });
+    } else {
+        setStatus('✅ Sequential date and reporting period checks passed.', 'success');
+    }
+    sequenceResult.warnings.forEach(warn => setStatus(`⚠️ Sequence Notice: ${warn}`, 'warning'));
+
+    // v7.0.3 — Distance vs Fuel Consumption logic (Check #4)
+    const distanceResult = checkDistanceVsFuelLogic();
+    distanceResult.warnings.forEach(warn => setStatus(`⚠️ Distance Logic Notice: ${warn}`, 'warning'));
 
     await sleep(CONFIG.SLEEP_POLL_MS);
 
@@ -1823,6 +2216,25 @@ async function approveReport() {
     await sleep(CONFIG.SLEEP_POST_CLICK_MS);
     // FIX D: wait for the PrimeNG popup to finish rendering
     await waitForDOMStable();
+
+    // v7.0.3: check for the hard-error modal ("Errors detected in the
+    // submitted data") immediately after Approve is clicked — this modal
+    // has no Yes/Proceed button of its own and must stop Autopilot outright.
+    const postClickWarnings = extractWarningDialogMessages();
+    const postClickFatal = postClickWarnings.find(msg => {
+        const lower = msg.toLowerCase();
+        return CONFIG.FATAL_WARNING_PHRASES.some(p => lower.includes(p));
+    });
+    if (postClickFatal) {
+        setStatus(`🛑 FATAL: ${postClickFatal}`, 'error');
+        postClickWarnings.forEach(msg => {
+            if (msg !== postClickFatal) setStatus(`🛑 ${msg}`, 'error');
+        });
+        setStatus('🛑 Errors detected in the submitted data — stopping Autopilot.', 'error');
+        window.autopilotRunning = false;
+        updateUIButton();
+        return false;
+    }
 
     setStatus('Confirming report verification dialogue...', 'info');
 
@@ -1870,6 +2282,22 @@ async function approveReport() {
     setStatus('Evaluating modal chain for trailing warnings...', 'info');
     await sleep(CONFIG.SLEEP_POST_DIALOG_MS);
 
+    // v7.0.3: hard-stop check — if the dialog reports actual data errors
+    // (not just advisory warnings), halt Autopilot entirely. This check
+    // runs regardless of whether a "Proceed Anyway" button is present.
+    const earlyWarningMessages = extractWarningDialogMessages();
+    const fatalMessage = earlyWarningMessages.find(msg => {
+        const lower = msg.toLowerCase();
+        return CONFIG.FATAL_WARNING_PHRASES.some(p => lower.includes(p));
+    });
+    if (fatalMessage) {
+        setStatus(`🛑 FATAL: ${fatalMessage}`, 'error');
+        setStatus('🛑 Errors detected in the submitted data — stopping Autopilot.', 'error');
+        window.autopilotRunning = false;
+        updateUIButton();
+        return false;
+    }
+
     const proceedAnyway = queryAllContexts('button, .p-button, [role="button"]').find(el => {
         const innerT = (el.innerText || el.textContent || '').trim().toLowerCase();
         const labelT = (el.getAttribute('label') || '').toLowerCase();
@@ -1878,8 +2306,40 @@ async function approveReport() {
 
     if (proceedAnyway) {
         const contextData = extractReportContext();
-        if (contextData.reportType === 'In Port Report') {
-            setStatus('⚠️ Distance 0 warning caught in Port Context. Bypassing safely...', 'warning');
+        const warningMessages = extractWarningDialogMessages();
+
+        if (warningMessages.length > 0) {
+            // v7.0.3: inspect each individual warning line and only bypass
+            // when EVERY warning present is on the known-safe list.
+            const unrecognized = [];
+            warningMessages.forEach(msg => {
+                const lower = msg.toLowerCase();
+                const alwaysOk = CONFIG.ALWAYS_BYPASS_WARNING_PHRASES.some(p => lower.includes(p));
+                const portOk   = contextData.reportType === 'In Port Report' &&
+                    CONFIG.PORT_CONTEXT_BYPASS_WARNING_PHRASES.some(p => lower.includes(p));
+                if (alwaysOk) {
+                    setStatus(`✅ Recognized bypassable warning: "${msg}"`, 'success');
+                } else if (portOk) {
+                    setStatus(`✅ Recognized bypassable warning (In Port context): "${msg}"`, 'success');
+                } else {
+                    unrecognized.push(msg);
+                }
+            });
+
+            if (unrecognized.length === 0) {
+                proceedAnyway.click();
+                setStatus('✅ "Proceed Anyway" bypassed all known-safe warnings successfully.', 'success');
+                await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+            } else {
+                unrecognized.forEach(msg => {
+                    setStatus(`🛑 LOCKOUT: Unrecognized warning blocked auto-submission: "${msg}"`, 'error');
+                });
+                return false;
+            }
+        } else if (contextData.reportType === 'In Port Report') {
+            // Legacy fallback: dialog text could not be read, but the only
+            // historically-seen warning in this context is Observed Distance = 0.
+            setStatus('⚠️ Distance 0 warning caught in Port Context (legacy fallback). Bypassing safely...', 'warning');
             proceedAnyway.click();
             setStatus('✅ "Proceed Anyway" bypassed warning successfully.', 'success');
             await sleep(CONFIG.SLEEP_POST_CLICK_MS);
@@ -1888,6 +2348,7 @@ async function approveReport() {
             return false;
         }
     }
+
 
     setStatus('✅ Report successfully validated, signed off, and approved in system.', 'success');
     await sleep(CONFIG.DOM_STABLE_HEADSTART_MS);
@@ -1967,7 +2428,7 @@ async function rejectReportAsDuplicate(rejectionMessage) {
 }
 
 // ---------------------------------------------------------------------------
-//   NAVIGATION  (v6.1.8 — strict sequential, never skips, warns on date gaps)
+//   NAVIGATION  (v7.0.3 — strict sequential, never skips, warns on date gaps)
 // ---------------------------------------------------------------------------
 
 function extractDateFromSig(sig) {
@@ -2183,6 +2644,17 @@ async function runAutopilot() {
                 break;
             }
 
+            // ── STEP 4b: Verify the sidebar actually shows green/approved ─────
+            if (approved === true && crossReportData.currentSig) {
+                setStatus('━━━ Verification phase: confirming sidebar approval status ━━━', 'info');
+                const verified = await verifyApprovalAndRetry(crossReportData.currentSig, crossReportData.currentCard);
+                if (!verified) {
+                    window.autopilotRunning = false;
+                    updateUIButton();
+                    break;
+                }
+            }
+
             // ── STEP 5: Navigate to next pending report ───────────────────────
             setStatus('━━━ Navigation phase: moving to next pending report ━━━', 'info');
             const hasMoreReports = await goToNextPendingReport();
@@ -2208,20 +2680,70 @@ function injectControlPanel() {
     document.getElementById('autopilot-btn')?.remove();
     document.getElementById('autopilot-status')?.remove();
 
+    // v7.0.3: outer panel is now a flex column — a NON-scrolling header bar
+    // (title + close button) on top, and a separately-scrolling content
+    // area below it. This fixes the v7.0.1 bug where the close button,
+    // although absolutely positioned, scrolled out of view along with the
+    // log lines because it shared the same scrolling containing block.
     const statusBox = document.createElement('div');
     statusBox.id = 'autopilot-status';
     statusBox.style.cssText = `
         position: fixed; bottom: 85px; left: 20px; z-index: 99999;
-        padding: 12px; font-size: 13px; font-family: monospace;
+        font-size: 13px; font-family: monospace;
         background-color: rgba(10, 11, 15, 0.98); color: #fff;
         border: 1px solid #444; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.7);
-        display: none; min-width: 400px; max-height: 250px; overflow-y: auto;
+        display: none; min-width: 400px; max-width: 600px; max-height: 250px;
+        flex-direction: column; overflow: hidden;
     `;
     document.body.appendChild(statusBox);
 
+    const headerBar = document.createElement('div');
+    headerBar.id = 'autopilot-status-header';
+    headerBar.style.cssText = `
+        display: flex; align-items: center; justify-content: space-between;
+        flex: 0 0 auto; padding: 10px 10px 8px 12px;
+        border-bottom: 1px solid #222;
+    `;
+
+    const headerTitle = document.createElement('span');
+    headerTitle.style.cssText = 'color:#888; font-weight:bold;';
+    headerTitle.innerText = '🤖 SYSTEM ACTIVE LOG (v7.0.3):';
+    headerBar.appendChild(headerTitle);
+
+    const closeBtn = document.createElement('button');
+    closeBtn.id = 'autopilot-status-close';
+    closeBtn.innerText = '×';
+    closeBtn.title = 'Close log';
+    closeBtn.style.cssText = `
+        width: 22px; height: 22px; line-height: 18px; padding: 0;
+        font-size: 16px; font-weight: bold; color: #e53935;
+        background-color: transparent; border: 1px solid #e53935;
+        border-radius: 50%; cursor: pointer; flex: 0 0 auto;
+    `;
+    closeBtn.addEventListener('mouseenter', () => {
+        closeBtn.style.backgroundColor = '#e53935';
+        closeBtn.style.color = '#fff';
+    });
+    closeBtn.addEventListener('mouseleave', () => {
+        closeBtn.style.backgroundColor = 'transparent';
+        closeBtn.style.color = '#e53935';
+    });
+    closeBtn.addEventListener('click', () => {
+        statusBox.style.display = 'none';
+    });
+    headerBar.appendChild(closeBtn);
+    statusBox.appendChild(headerBar);
+
+    const contentArea = document.createElement('div');
+    contentArea.id = 'autopilot-status-content';
+    contentArea.style.cssText = `
+        flex: 1 1 auto; overflow-y: auto; padding: 10px 12px 12px 12px;
+    `;
+    statusBox.appendChild(contentArea);
+
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v6.1.8)';
+    btn.innerText = '▶ Start Autopilot (v7.0.3)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -2233,7 +2755,7 @@ function injectControlPanel() {
         window.autopilotRunning = !window.autopilotRunning;
         updateUIButton();
         if (window.autopilotRunning) {
-            document.getElementById('autopilot-status').style.display = 'block';
+            statusBox.style.display = 'flex';
             runAutopilot();
         } else {
             setStatus('⏹ Interrupted execution chain manually.', 'warning');
@@ -2244,8 +2766,8 @@ function injectControlPanel() {
 }
 
 function setStatus(message, type = 'info') {
-    const box = document.getElementById('autopilot-status');
-    if (!box) return;
+    const content = document.getElementById('autopilot-status-content');
+    if (!content) return;
 
     const colorMap = { success: '#81c784', error: '#e57373', warning: '#fff176' };
     const color = colorMap[type] || '#ffffff';
@@ -2254,14 +2776,14 @@ function setStatus(message, type = 'info') {
     line.style.cssText = `color: ${color}; margin-bottom: 4px; border-bottom: 1px solid #222; padding-bottom: 2px;`;
     line.innerText = message;
 
-    box.appendChild(line);
-    box.scrollTop = box.scrollHeight;
+    content.appendChild(line);
+    content.scrollTop = content.scrollHeight;
 }
 
 function clearStatus() {
-    const box = document.getElementById('autopilot-status');
-    if (box) {
-        box.innerHTML = "<div style='color:#888; margin-bottom:8px; font-weight:bold;'>🤖 SYSTEM ACTIVE LOG (v6.1.8):</div>";
+    const content = document.getElementById('autopilot-status-content');
+    if (content) {
+        content.innerHTML = '';
     }
 }
 
@@ -2272,7 +2794,7 @@ function updateUIButton() {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
     } else {
-        btn.innerText = '▶ Start Autopilot (v6.1.8)';
+        btn.innerText = '▶ Start Autopilot (v7.0.3)';
     }
 }
 
