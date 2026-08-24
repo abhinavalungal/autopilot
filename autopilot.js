@@ -1,166 +1,4 @@
-// =========================================================================
-//   MARITIME REPORT AUTOPILOT — v7.2.6
-//
-//   v7.2.6 changes:
-//     - Fixed false "Sidebar not green" halts. Three compounding bugs fixed:
-//       1. isGreenish() threshold lowered (10→5) and minimum brightness
-//          added to catch GeoEmissions' muted/teal green cards.
-//       2. isCardChecked() now scans ALL descendant elements of the card,
-//          not just the outermost wrapper — the green highlight is applied
-//          to inner divs/spans in GeoEmissions' Angular component tree.
-//          Also checks for green check-mark icons and CSS class names.
-//       3. verifyApprovalAndRetry() now polls up to 5 times with
-//          increasing delays (800ms..2500ms) before concluding failure,
-//          accounting for Angular CSS transitions. Falls back to
-//          isCurrentReportAlreadyApproved() form-state check. Never
-//          halts on colour-detection uncertainty — warns and continues.
-//
-//   v7.2.5 changes:
-//     - "Observed Distance reported is 0 kindly review" now bypassed on
-//       all non-At-Sea reports (In Port, Departure, Arrival). The old
-//       phrase 'observed distance is 0' did not match GeoEmissions' actual
-//       warning text. Four variants now covered:
-//         'observed distance is 0'
-//         'observed distance reported is 0'
-//         'distance reported is 0'
-//         'distance is 0'
-//     - Port-context bypass broadened from 'In Port Report' exact match
-//       to any report whose type does not include 'sea', so Departure and
-//       Arrival reports also get the distance-0 bypass.
-//
-//   v7.2.4 changes:
-//     - Fixed spurious "Pre-approval guard failed" halt. Root cause: after
-//       approval Angular briefly de-highlights the active sidebar card,
-//       so identifyCurrentCard() returns null and signaturesMatch() fails
-//       even though the UI is still on the correct report.
-//       ensureOnCurrentReport() now has three fallback tiers:
-//         1. Sidebar card signature match (as before)
-//         2. Page body content fingerprint (vessel name + date visible in DOM)
-//         3. Navigate back → re-check content fingerprint before halting
-//       Only halts if we can positively confirm we are on the WRONG report
-//       and cannot recover — never halts on mere navigation uncertainty.
-//
-//   v7.2.3 changes:
-//     - AIS distance discrepancy warning now uses a 3-tier NM-gap decision
-//       instead of a blanket lockout:
-//         diff ≤ 30 NM  → bypass silently (normal weather/current/wave variation)
-//         diff 30-50 NM → log advisory warning but still click Proceed Anyway
-//         diff > 50 NM  → hard lockout (likely a data entry error)
-//       Thresholds configurable via CONFIG.AIS_DIST_WARN_NM /
-//       CONFIG.AIS_DIST_LOCKOUT_NM.
-//
-//   v7.2.2 changes:
-//     - Fixed false Event Fuel Block Lockout: scrapeEventFuelRows() was
-//       using wrong table selectors and returning empty results even when
-//       ROB values were present. Now reuses the already-correctly-scraped
-//       currentBunkerCheck data (which the DEBUG output confirms works).
-//     - Dead reckoning now stores lat/lon on ALL report types (port,
-//       arrival, departure) not just At Sea, so the position chain stays
-//       intact across mixed report sequences.
-//
-//   v7.2.1 changes:
-//     - Auto-delete blank event rows: when the EVENTS grid contains a row
-//       with no event type selected ("Select a Event Types"), Autopilot now
-//       clicks the row's delete button (name="delBtn") automatically and
-//       re-runs the event check. Only locks out if a genuinely unapproved
-//       event type (non-blank) remains after the delete.
-//
-//   v7.2.0 changes:
-//     - Dead Reckoning Position Estimator for At Sea reports.
-//       Reads the previous report's confirmed position (stored in session),
-//       the current report's heading (input[name="heading"]) and observed
-//       distance (input[name="observeddistancesincelastreport"]), then uses
-//       the spherical Earth direct-reckoning formula to calculate where the
-//       vessel SHOULD be. Compares against the reported lat/lon and shows:
-//         ✅  gap ≤ 15 NM  → passes (normal current/route variation)
-//         ⚠️  gap 15-40 NM → advisory + suggested corrected coordinates
-//         ⚠️  gap > 40 NM  → significant discrepancy + suggested coordinates
-//              formatted in DMS ready to copy into the form
-//       Suggestion only — never writes to the form.
-//       If heading field absent, falls back to great-circle distance check.
-//       If gap > 40 NM, the DR estimate is used as the baseline for the
-//       NEXT report (avoids compounding errors from a bad coordinate).
-//
-//   v7.1.4 changes:
-//     - Fixed false lockout on "Please confirm if voyage number needs an
-//       increment" (and other valid bypass phrases). Root cause: the single
-//       extractWarningDialogMessages() function was also reading boilerplate
-//       nodes — div.header, p.subtitle, div.previous-report-info ("Prev Ref.
-//       Report: ...") — which are never in the bypass list, so unrecognized[]
-//       was always non-empty even when the only real warning was bypassable.
-//       Fix: split into two functions:
-//         extractWarningMessages()       STRICT — only <ul><li>/.warning-item
-//           → used for bypass/lockout decision.
-//         extractWarningDialogMessages() BROAD  — also reads headings/titles
-//           → used only for fatal-error detection.
-//
-//   v7.1.3 changes:
-//     - "Please confirm if voyage number needs an increment" added to the
-//       always-bypass warning list — Autopilot clicks Proceed Anyway
-//       automatically without halting.
-//
-//   v7.1.2 changes:
-//     - New Validation Check #6: Great-Circle Distance Verification.
-//       Reads the current report's Latitude and Longitude fields
-//       (id="latitude", id="longitude", DMS format: "DD M' SS\" N/S"),
-//       stores each position as Autopilot processes reports, and calculates
-//       the Haversine great-circle distance (in Nautical Miles) between
-//       the previous report's position and the current one.
-//       Results shown in the log every report:
-//         • Previous position / Current position (raw DMS + decimal)
-//         • Calculated great-circle distance in NM
-//         • Reported Observed Distance and the absolute/relative difference
-//       Warnings triggered:
-//         • >10% AND >20 NM difference  →  minor discrepancy notice
-//         • >20% AND >50 NM difference  →  significant discrepancy warning
-//       The first report in a run stores the position and skips comparison
-//       (no prior position to compare against). Position resets on every
-//       fresh Autopilot start.
-//
-//   v7.0.3 changes:
-//     - ADJ must always be 0. Any non-zero ADJ value (positive or negative,
-//       e.g. -1) in the Bunker ROB grid now blocks approval as a hard
-//       error, with the offending ADJ field highlighted red and scrolled
-//       into view, same as the existing Last ROB / ROB Start checks.
-//
-//   v7.0.2 changes:
-//     - Fixed close-button placement: it was absolutely positioned inside
-//       the same scrollable element as the log lines, so it scrolled out
-//       of view as the log grew (appeared "stuck" near the bottom). The
-//       log panel is now a fixed (non-scrolling) header bar — title left,
-//       red × close button top-right — with a separately-scrolling content
-//       area underneath. The button never moves regardless of log length.
-//     - The "Errors detected in the submitted data" hard-error modal is now
-//       detected in two places: immediately after clicking Approve (this
-//       modal has no Yes/Proceed button of its own), and after the Yes
-//       confirmation click. Either match stops Autopilot outright.
-//     - extractWarningDialogMessages() now also reads dialog headings/
-//       titles, not just <p>/<li> text, so a modal whose error text is the
-//       title itself (as in "Errors detected in the submitted data") is
-//       still picked up.
-//
-//   v7.0.1: version bump only (re-tag for cache-busting / deployment
-//   verification — confirms the close-button repositioning and the fatal
-//   "errors detected in the submitted data" hard-stop from v7.0.0 are
-//   live). No functional changes beyond v7.0.0.
-//
-//   v7.0.0 changes:
-//     - Warning-dialog interceptor now reads the actual warning text list
-//       (not just report context) and bypasses only known-safe warnings:
-//       "Confirm if the incinerator value is correct" and
-//       "Report time cannot be less than vessel activation date" (plus the
-//       existing Observed-Distance-0-in-Port-context bypass). Any other
-//       warning text still causes a hard LOCKOUT.
-//     - Close (×) button added to the SYSTEM ACTIVE LOG panel.
-//     - Post-approval guard: if a report is approved but its sidebar card
-//       is not green (i.e. not actually confirmed approved), Autopilot
-//       automatically returns to that report and re-runs the approval flow.
-//     - New validation checks: sequential date verification, reporting
-//       period limits (1-25 hrs between reports), voyage continuity
-//       (sidebar), observed-distance-vs-fuel-consumption logic, and event
-//       block fuel ROB validation (ROB Start = ROB End where applicable,
-//       and at least one fuel type ROB value must not be blank).
-// =========================================================================
+
 
 (function () {
 
@@ -184,8 +22,24 @@ const CONFIG = {
     YES_BTN_RETRY_DELAY_MS: 300,
 
     // v7.1.2: reporting period validity window (Validation Check #2)
+    // v7.3.0: max interval raised 25 → 26 hrs per updated report-time-gap
+    // policy — any gap strictly greater than this halts Autopilot immediately.
     REPORT_INTERVAL_MIN_HOURS: 1,
-    REPORT_INTERVAL_MAX_HOURS: 25,
+    REPORT_INTERVAL_MAX_HOURS: 26,
+
+    // v7.3.0: website buffering / loading-screen recovery. These govern
+    // waitForPageReady() — buffering is never treated as an error on its
+    // own; Autopilot pauses and polls, only halting if the page fails to
+    // recover within this budget.
+    PAGE_LOAD_POLL_MS: 600,
+    PAGE_LOAD_POLL_MAX_MS: 4000,
+    PAGE_LOAD_MAX_WAIT_MS: 45000,
+    PAGE_LOAD_MAX_RETRIES: 20,
+    // v7.4.2: a real buffering condition holds steady for at least this
+    // long; a single-frame CSS-transition flicker does not. Requiring the
+    // second isPageBuffering() check to still be true after this delay
+    // filters that flicker out before Autopilot ever logs/pauses for it.
+    BUFFERING_CONFIRM_DELAY_MS: 150,
 
     // v7.2.5: warning text fragments (lowercase) that Autopilot is allowed
     // to bypass via "Proceed Anyway" regardless of report context.
@@ -220,6 +74,56 @@ const CONFIG = {
     AIS_DIST_WARN_NM:    30,
     AIS_DIST_LOCKOUT_NM: 50,
 
+    // ── v7.4.0 [1] Purpose-column fuel consumption ────────────────────────
+    // Canonical purpose name → accepted header-text / data-td-name tokens.
+    // Tokens are matched EXACTLY against the normalised column identifier
+    // (lowercased, all non-alphanumerics stripped) so that the Consumption
+    // group columns (Main / Aux / Total / Adj) can never be mistaken for a
+    // "Used For" purpose column.
+    PURPOSE_FUEL_COLUMNS: {
+        'Propulsion': ['propulsion', 'propulsionconsumption'],
+        'Maneuver':   ['maneuver', 'manoeuvre', 'manoeuver', 'manuever',
+                       'maneuvering', 'manoeuvring', 'maneuvre'],
+        'Generator':  ['generator', 'generators', 'gen', 'dg', 'auxengine',
+                       'auxiliaryengine'],
+        'L/D':        ['ld', 'loaddisch', 'loaddischarge', 'loaddischidle',
+                       'loadingdischarging', 'loaddischarging', 'cargooperations',
+                       'cargooperation', 'cargoops', 'loading', 'discharging'],
+        'Deballast':  ['deballast', 'deballasting', 'deballastng'],
+        'IGS':        ['igs', 'inertgas', 'inertgassystem', 'inertgasplant'],
+        'Boiler':     ['boiler', 'boilers', 'auxboiler', 'auxiliaryboiler',
+                       'boilerconsumption']
+    },
+
+    // ── v7.4.0 [2] Halt / restart behaviour ───────────────────────────────
+    // A transient (non-genuine) failure retries the same report instead of
+    // stopping the bot. Only after MAX_TRANSIENT_RETRIES consecutive
+    // transient failures on the same report is it escalated to a genuine
+    // halt, so the bot can never spin forever OR sit stopped for no reason.
+    MAX_TRANSIENT_RETRIES: 4,
+    TRANSIENT_RETRY_DELAY_MS: 400,
+    // Watchdog: how often to check whether the loop stopped without a
+    // genuine reason, and how quickly to resume when it did.
+    WATCHDOG_INTERVAL_MS: 250,
+    WATCHDOG_RESUME_DELAY_MS: 150,
+
+    // ── v7.4.0 [3] No-skip navigation verification ────────────────────────
+    NAV_VERIFY_ATTEMPTS: 3,
+    NAV_VERIFY_DELAY_MS: 600,
+
+    // ── v7.4.0 [6] Departure report terminal event ────────────────────────
+    DEPARTURE_FINAL_EVENT: 'SHIFTING FROM LAST BERTH TO SEA',
+    DEPARTURE_FINAL_EVENT_ALIASES: [
+        'SHIFTING FROM LAST BERTH TO SEA',
+        'SHIFT FROM LAST BERTH TO SEA'
+    ],
+
+    // ── v7.4.0 [7] Arrival / At Sea event conflict ────────────────────────
+    // Two events are considered "the same event" when the event type matches
+    // and either their start timestamps are equal (within this tolerance) or
+    // their start→end windows overlap.
+    EVENT_MATCH_TOLERANCE_MS: 60 * 1000,
+
     APPROVED_PORT_EVENTS: [
         'IDLE IN PORT',
         'SHIFT TO ANCHOR',
@@ -252,6 +156,211 @@ const FIELD_STYLES = {
 };
 
 window.autopilotRunning = false;
+
+
+const AutopilotState = {
+    sessionActive:    false,
+    userStopped:      false,
+    genuineHalt:      false,
+    haltReason:       '',
+    loopActive:       false,
+    transientRetries: 0,
+    watchdogTimer:    null,
+    resumeTimer:      null
+};
+window.__autopilotState = AutopilotState;
+
+// Genuine halt: a real validation problem. Stops the bot and KEEPS it
+// stopped (watchdog will not resume) until the user acts.
+function haltForUser(reason) {
+    AutopilotState.genuineHalt = true;
+    AutopilotState.haltReason  = reason || 'Validation issue requires review.';
+    window.autopilotRunning    = false;
+    stopWatchdog();
+    setStatus(`🛑 HALTED — user intervention required: ${AutopilotState.haltReason}`, 'error');
+    setStatus('   Autopilot will stay stopped. Fix the issue above, then click Start.', 'error');
+    updateUIButton();
+}
+
+// User-initiated stop: sticky. Nothing auto-restarts after this.
+function stopByUser() {
+    AutopilotState.userStopped   = true;
+    AutopilotState.sessionActive = false;
+    AutopilotState.genuineHalt   = false;
+    AutopilotState.haltReason    = '';
+    window.autopilotRunning      = false;
+    stopWatchdog();
+    if (AutopilotState.resumeTimer) {
+        clearTimeout(AutopilotState.resumeTimer);
+        AutopilotState.resumeTimer = null;
+    }
+    setStatus('⏹ Stopped by user. Autopilot will remain stopped until Start is clicked.', 'warning');
+    updateUIButton();
+}
+
+// Normal completion — queue exhausted. Not a halt, not an error.
+function finishRun(message) {
+    AutopilotState.sessionActive = false;
+    AutopilotState.genuineHalt   = false;
+    window.autopilotRunning      = false;
+    stopWatchdog();
+    if (message) setStatus(message, 'success');
+    updateUIButton();
+}
+
+function startWatchdog() {
+    if (AutopilotState.watchdogTimer) return;
+    AutopilotState.watchdogTimer = setInterval(() => {
+        // Never resume after a user Stop — this is the strict rule.
+        if (AutopilotState.userStopped)   return;
+        if (!AutopilotState.sessionActive) return;
+        if (AutopilotState.genuineHalt)   return;
+        if (window.autopilotRunning)      return;
+        if (AutopilotState.resumeTimer)   return;
+
+        // Stopped with no genuine reason and no user stop → false positive.
+        setStatus('♻️ Autopilot stopped without a genuine validation reason — auto-recovering...', 'warning');
+        AutopilotState.resumeTimer = setTimeout(() => {
+            AutopilotState.resumeTimer = null;
+            if (AutopilotState.userStopped || AutopilotState.genuineHalt) return;
+            if (!AutopilotState.sessionActive) return;
+            window.autopilotRunning = true;
+            updateUIButton();
+            setStatus('▶️ Resumed automatically.', 'success');
+            runAutopilot();
+        }, CONFIG.WATCHDOG_RESUME_DELAY_MS);
+    }, CONFIG.WATCHDOG_INTERVAL_MS);
+}
+
+function stopWatchdog() {
+    if (AutopilotState.watchdogTimer) {
+        clearInterval(AutopilotState.watchdogTimer);
+        AutopilotState.watchdogTimer = null;
+    }
+}
+
+
+const ProcessingLedger = {
+    order:   [],          // expected processing order (keys)
+    entries: new Map(),   // key → { key, label, status, note, updatedAt }
+    initialised: false
+};
+window.__autopilotLedger = ProcessingLedger;
+
+function sigKey(sig) {
+    if (!sig) return '';
+    return [
+        (sig.vesselName || '').toUpperCase(),
+        sig.reportType  || '',
+        sig.routeInfo   || '',
+        sig.date        || '',
+        sig.time        || '',
+        sig.utcOffset   || ''
+    ].join('|');
+}
+
+function resetLedger() {
+    ProcessingLedger.order = [];
+    ProcessingLedger.entries.clear();
+    ProcessingLedger.initialised = false;
+}
+
+// Builds the expected processing order from the sidebar. Processing runs
+// from the currently-selected card upwards (index → 0), matching the
+// existing sequential navigation behaviour.
+function initialiseLedger(sidebarCards, currentCard) {
+    const cards = sidebarCards && sidebarCards.length ? sidebarCards : getAllReportCards();
+    if (!cards.length) return;
+
+    const startIndex = Math.max(0, cards.indexOf(currentCard || identifyCurrentCard(cards)));
+
+    for (let i = startIndex; i >= 0; i--) {
+        const sig = extractCardSignature(cards[i]);
+        const key = sigKey(sig);
+        if (!key.replace(/\|/g, '')) continue;
+        if (ProcessingLedger.entries.has(key)) continue;
+        ProcessingLedger.order.push(key);
+        ProcessingLedger.entries.set(key, {
+            key,
+            label: describeSignature(sig),
+            status: 'pending',
+            note: '',
+            updatedAt: Date.now()
+        });
+    }
+
+    ProcessingLedger.initialised = true;
+    setStatus(`🧾 Processing ledger initialised — ${ProcessingLedger.order.length} report(s) queued for this run.`, 'info');
+}
+
+function ledgerEnsureEntry(sig) {
+    const key = sigKey(sig);
+    if (!key.replace(/\|/g, '')) return null;
+    if (!ProcessingLedger.entries.has(key)) {
+        // A report that was not in the original snapshot (queue changed
+        // mid-run). Add it rather than letting it fall through unnoticed.
+        ProcessingLedger.entries.set(key, {
+            key,
+            label: describeSignature(sig),
+            status: 'pending',
+            note: 'added mid-run (not present in the initial queue snapshot)',
+            updatedAt: Date.now()
+        });
+        ProcessingLedger.order.push(key);
+        setStatus(`🧾 Ledger: new report appeared mid-run and was added to the queue — ${describeSignature(sig)}`, 'info');
+    }
+    return ProcessingLedger.entries.get(key);
+}
+
+function ledgerMark(key, status, note) {
+    const entry = ProcessingLedger.entries.get(key);
+    if (!entry) return;
+    entry.status    = status;
+    entry.note      = note || entry.note;
+    entry.updatedAt = Date.now();
+}
+
+const LEDGER_COMPLETE_STATUSES = [
+    'approved', 'rejected-duplicate', 'already-approved', 'already-rejected'
+];
+
+function ledgerIsComplete(key) {
+    const entry = ProcessingLedger.entries.get(key);
+    return !!entry && LEDGER_COMPLETE_STATUSES.includes(entry.status);
+}
+
+// Returns the key that should be processed after `completedKey`.
+function ledgerNextExpectedKey(completedKey) {
+    const idx = ProcessingLedger.order.indexOf(completedKey);
+    if (idx < 0) return null;
+    for (let i = idx + 1; i < ProcessingLedger.order.length; i++) {
+        const key = ProcessingLedger.order[i];
+        if (!ledgerIsComplete(key)) return key;
+    }
+    return null;
+}
+
+// End-of-run accounting — states explicitly whether anything was missed.
+function reportLedgerReconciliation() {
+    if (!ProcessingLedger.initialised || ProcessingLedger.order.length === 0) return;
+
+    const missed = ProcessingLedger.order.filter(k => !ledgerIsComplete(k));
+    const done   = ProcessingLedger.order.length - missed.length;
+
+    setStatus('━━━ Processing reconciliation ━━━', 'info');
+    setStatus(`🧾 ${done} of ${ProcessingLedger.order.length} queued report(s) completed.`, done === ProcessingLedger.order.length ? 'success' : 'warning');
+
+    if (missed.length === 0) {
+        setStatus('✅ No reports were skipped — every report in the queue was accounted for.', 'success');
+        return;
+    }
+
+    setStatus(`⚠️ ${missed.length} report(s) were NOT completed and need attention:`, 'warning');
+    missed.forEach(k => {
+        const e = ProcessingLedger.entries.get(k);
+        setStatus(`   • ${e.label} — status: ${e.status}${e.note ? ` (${e.note})` : ''}`, 'warning');
+    });
+}
 
 // ---------------------------------------------------------------------------
 //   DOM UTILITIES & INTERFACES
@@ -360,6 +469,122 @@ function waitForDOMStable(
     });
 }
 
+
+let _lastBufferingReason = '';
+
+function getLastBufferingReason() {
+    return _lastBufferingReason;
+}
+
+function isElementVisible(el) {
+    if (!el) return false;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    if (parseFloat(style.opacity || '1') === 0) return false;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+}
+
+function isPageBuffering() {
+    _lastBufferingReason = '';
+
+    // 1. Document itself still loading (navigation / full reload in progress)
+    if (document.readyState !== 'complete') {
+        _lastBufferingReason = `document.readyState is "${document.readyState}"`;
+        return true;
+    }
+
+    const LOADING_SELECTORS = [
+        '.p-progress-spinner',
+        '.p-progressbar .p-progressbar-indeterminate',
+        '.p-blockui', '.p-blockui-container',
+        '.p-component-overlay',
+        '.cdk-overlay-backdrop',
+        '[role="progressbar"]',
+        '[aria-busy="true"]'
+    ];
+    for (const sel of LOADING_SELECTORS) {
+        for (const el of queryAllContexts(sel)) {
+            if (isElementVisible(el)) {
+                _lastBufferingReason = `visible loading indicator matched "${sel}"`;
+                return true;
+            }
+        }
+    }
+
+    //    dropped from the list entirely.
+    const OVERLAY_CONTAINER_SELECTORS = [
+        '.p-toast-message', '.p-dialog', '.p-blockui-content',
+        '[role="alert"]', '[role="status"]', '[aria-live]'
+    ];
+    const LOADING_PHRASES = [
+        'loading...', 'loading…', 'buffering',
+        'fetching data', 'connecting to server', 'reconnecting'
+    ];
+    for (const sel of OVERLAY_CONTAINER_SELECTORS) {
+        for (const el of queryAllContexts(sel)) {
+            if (!isElementVisible(el)) continue;
+            const txt = (el.innerText || el.textContent || '').toLowerCase();
+            const matched = LOADING_PHRASES.find(p => txt.includes(p));
+            if (matched) {
+                _lastBufferingReason = `overlay text "${matched}" found inside "${sel}"`;
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
+// Pauses execution while the page is buffering/loading, polling with a
+// gentle backoff, then resumes automatically. Returns true once the page
+// is ready. Only returns false — signalling Autopilot should halt — if the
+// page fails to recover within PAGE_LOAD_MAX_WAIT_MS / MAX_RETRIES.
+async function waitForPageReady(stepLabel = 'current step') {
+    if (!isPageBuffering()) return true;
+
+    // v7.4.2: confirm with a short second check before logging/pausing —
+    // filters out a single-frame CSS-transition flicker that would
+    // otherwise be misreported as real buffering.
+    await sleep(CONFIG.BUFFERING_CONFIRM_DELAY_MS);
+    if (!isPageBuffering()) return true;
+
+    setStatus(
+        `⏳ Buffering/loading detected during ${stepLabel} ` +
+        `(${getLastBufferingReason() || 'reason unavailable'}) — pausing and waiting for the page to become responsive...`,
+        'warning'
+    );
+
+    const startTime = Date.now();
+    let attempts = 0;
+    let delay = CONFIG.PAGE_LOAD_POLL_MS;
+
+    while (isPageBuffering()) {
+        attempts++;
+
+        if (
+            Date.now() - startTime > CONFIG.PAGE_LOAD_MAX_WAIT_MS ||
+            attempts > CONFIG.PAGE_LOAD_MAX_RETRIES
+        ) {
+            setStatus(
+                `🛑 LOCKOUT: Page did not finish loading after ${attempts} retries ` +
+                `(${Math.round((Date.now() - startTime) / 1000)}s) during ${stepLabel}. ` +
+                `Halted — please check the connection/page and resume manually.`,
+                'error'
+            );
+            return false;
+        }
+
+        await sleep(delay);
+        delay = Math.min(delay * 1.3, CONFIG.PAGE_LOAD_POLL_MAX_MS);
+    }
+
+    if (attempts > 0) {
+        setStatus(`✅ Page responsive again after ${attempts} retr${attempts === 1 ? 'y' : 'ies'} — resuming ${stepLabel}.`, 'success');
+    }
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 //   FIELD FINDERS & CONTEXT SCRAPERS
 // ---------------------------------------------------------------------------
@@ -389,6 +614,182 @@ function findSteamingHoursInput() {
         }
     }
     return null;
+}
+
+
+
+function normaliseColumnToken(text) {
+    return (text || '')
+        .toString()
+        .toLowerCase()
+        .replace(/\(.*?\)/g, ' ')     // drop parenthetical qualifiers
+        .replace(/[^a-z0-9]/g, '');   // strip spaces, slashes, dashes, dots
+}
+
+function purposeForToken(token) {
+    if (!token) return null;
+    for (const [purpose, aliases] of Object.entries(CONFIG.PURPOSE_FUEL_COLUMNS)) {
+        if (aliases.includes(token)) return purpose;
+    }
+    return null;
+}
+
+function parseNumericCellValue(cell) {
+    if (!cell) return 0;
+
+    const input = cell.querySelector ? cell.querySelector('input') : null;
+    let raw;
+
+    if (input) {
+        raw = input.value;
+    } else {
+        raw = (cell.innerText || cell.textContent || '');
+        // Strip any responsive column-title label rendered inside the cell
+        const titleEl = cell.querySelector ? cell.querySelector('.p-column-title') : null;
+        if (titleEl) raw = raw.replace((titleEl.innerText || '').trim(), '');
+    }
+
+    const cleaned = (raw || '').replace(/,/g, '').trim();
+    if (cleaned === '' || cleaned === '-' || cleaned.toUpperCase() === 'N/A') return 0;
+
+    const match = cleaned.match(/-?\d+(?:\.\d+)?/);
+    if (!match) return 0;
+
+    const n = parseFloat(match[0]);
+    return isNaN(n) ? 0 : n;
+}
+
+function getPurposeFuelConsumptionTotals() {
+    const totals = {};
+    Object.keys(CONFIG.PURPOSE_FUEL_COLUMNS).forEach(p => { totals[p] = 0; });
+
+    const columnsFound = new Set();
+    let tablesScanned = 0;
+
+    for (const ctx of getAllContexts()) {
+        if (!ctx) continue;
+
+        const tables = Array.from(ctx.querySelectorAll('table, .p-datatable-table, [role="table"], [role="grid"]'));
+
+        for (const table of tables) {
+            tablesScanned++;
+
+            // ── Build a column-index → purpose map from the header rows ──
+            const colMap = {};
+            const headerCells = Array.from(table.querySelectorAll('thead th, thead td, tr th'));
+            if (headerCells.length) {
+                // Group header rows can span columns (e.g. "Used For" over 8
+                // sub-columns), so walk each header row separately and index
+                // by position within that row.
+                const headerRows = new Set(headerCells.map(c => c.parentElement).filter(Boolean));
+                for (const hr of headerRows) {
+                    const cells = Array.from(hr.children);
+                    cells.forEach((cell, idx) => {
+                        const byAttr = purposeForToken(normaliseColumnToken(cell.getAttribute('data-td-name')));
+                        const byText = purposeForToken(normaliseColumnToken(cell.innerText || cell.textContent));
+                        const purpose = byAttr || byText;
+                        if (purpose) {
+                            colMap[idx] = purpose;
+                            columnsFound.add(purpose);
+                        }
+                    });
+                }
+            }
+
+            // ── Walk the data rows ───────────────────────────────────────
+            const bodyRows = Array.from(table.querySelectorAll('tbody tr'));
+            const rows = bodyRows.length ? bodyRows : Array.from(table.querySelectorAll('tr'));
+
+            for (const row of rows) {
+                if (row.querySelector('th') && !row.querySelector('td')) continue; // header row
+                const cells = Array.from(row.querySelectorAll('td'));
+                if (!cells.length) continue;
+
+                cells.forEach((cell, idx) => {
+                    const byAttr  = purposeForToken(normaliseColumnToken(cell.getAttribute('data-td-name')));
+                    const titleEl = cell.querySelector('.p-column-title');
+                    const byLabel = purposeForToken(normaliseColumnToken(
+                        titleEl ? titleEl.innerText : cell.getAttribute('data-label')
+                    ));
+                    const purpose = byAttr || byLabel || colMap[idx] || null;
+                    if (!purpose) return;
+
+                    columnsFound.add(purpose);
+                    const value = parseNumericCellValue(cell);
+                    if (value) totals[purpose] += value;
+                });
+            }
+        }
+    }
+
+    const purposesWithConsumption = Object.keys(totals)
+        .filter(p => Math.abs(totals[p]) > CONFIG.ADJ_TOLERANCE);
+
+    const grandTotal = Object.values(totals).reduce((a, b) => a + b, 0);
+
+    return {
+        totals,
+        purposesWithConsumption,
+        grandTotal,
+        columnsFound: Array.from(columnsFound),
+        tablesScanned
+    };
+}
+
+// Formats "Propulsion and Generator" / "Propulsion, Generator and Boiler"
+function formatPurposeList(purposes) {
+    if (!purposes || purposes.length === 0) return '';
+    if (purposes.length === 1) return purposes[0];
+    return purposes.slice(0, -1).join(', ') + ' and ' + purposes[purposes.length - 1];
+}
+
+// ---------------------------------------------------------------------------
+//   VESSEL STATUS  (At Sea vs In Port)
+//
+//   Reads the explicit vessel status / location control when present, and
+//   falls back to the report-type inference used elsewhere. The fallback is
+//   deliberately conservative: an unreadable status resolves to "not At Sea",
+//   which means blank rows are PRESERVED rather than deleted.
+// ---------------------------------------------------------------------------
+
+function getVesselStatusText() {
+    for (const ctx of getAllContexts()) {
+        if (!ctx) continue;
+
+        const selects = Array.from(ctx.querySelectorAll(
+            'select[id*="status" i], select[name*="status" i], ' +
+            'select[id*="location" i], select[name*="location" i], ' +
+            'select[id*="vesselstate" i], select[name*="vesselstate" i]'
+        ));
+        for (const sel of selects) {
+            const opt = sel.options && sel.options[sel.selectedIndex];
+            const txt = opt ? (opt.text || '').trim() : '';
+            if (txt) return txt;
+        }
+
+        const inputs = Array.from(ctx.querySelectorAll(
+            'input[id*="status" i], input[name*="status" i], ' +
+            'input[id*="location" i], input[name*="location" i]'
+        ));
+        for (const inp of inputs) {
+            if (inp.value && inp.value.trim()) return inp.value.trim();
+        }
+    }
+    return '';
+}
+
+function isVesselAtSea() {
+    const statusText = getVesselStatusText().toLowerCase();
+    if (statusText) {
+        if (/\bin\s*port\b/.test(statusText)) return false;
+        if (/\bat\s*sea\b/.test(statusText))  return true;
+    }
+    // Fallback: report-type inference (defaults to In Port when unreadable).
+    try {
+        return extractReportContext().reportType === 'At Sea NOON Report';
+    } catch {
+        return false;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -525,6 +926,8 @@ function extractCardSignature(card) {
 }
 
 function signaturesMatch(a, b) {
+    if (!a || !b) return false;
+
     const coreMatch = (
         a.reportType  !== '' && b.reportType  !== '' && a.reportType  === b.reportType  &&
         a.vesselName  !== '' && b.vesselName  !== '' && a.vesselName  === b.vesselName  &&
@@ -534,11 +937,86 @@ function signaturesMatch(a, b) {
 
     if (!coreMatch) return false;
 
+    // v7.4.0 [5]: two cards showing the same wall-clock time under different
+    // UTC offsets are DIFFERENT reports. Compare the offset whenever both
+    // cards carry one; if either is unreadable, fall back to the old
+    // wall-clock behaviour rather than failing to identify the card.
+    if (a.utcOffset && b.utcOffset && a.utcOffset !== b.utcOffset) return false;
+
     if (a.routeInfo || b.routeInfo) {
         return a.routeInfo === b.routeInfo;
     }
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+//   v7.4.0 [5] — TIMEZONE-AWARE DUPLICATE COMPARISON
+//
+//   Duplicate detection compares the COMPLETE timestamp — date, time AND the
+//   UTC offset — instead of the displayed date/time alone. Two reports at
+//   "2026-08-19 12:00 -02:00" and "2026-08-19 12:00 +02:00" are four hours
+//   apart and are therefore NOT duplicates.
+//
+//   Returns { isDuplicate, reason, offsetsCompared }
+// ---------------------------------------------------------------------------
+
+function compareSignatureTimestamps(a, b) {
+    const bothHaveOffset = !!(a.utcOffset && b.utcOffset);
+
+    if (bothHaveOffset) {
+        const tsA = reportTimestamp(a);
+        const tsB = reportTimestamp(b);
+        if (!isNaN(tsA) && !isNaN(tsB)) {
+            return {
+                sameInstant: tsA === tsB,
+                offsetsCompared: true,
+                deltaHours: (tsA - tsB) / (1000 * 60 * 60)
+            };
+        }
+    }
+
+    // Offset missing or unparseable on at least one side — compare the
+    // displayed date/time and let the caller report the reduced confidence.
+    return {
+        sameInstant: a.date === b.date && a.time === b.time,
+        offsetsCompared: false,
+        deltaHours: null
+    };
+}
+
+function signaturesAreDuplicate(a, b) {
+    if (!a || !b) return { isDuplicate: false, reason: 'missing signature', offsetsCompared: false };
+
+    const identityMatch = (
+        a.reportType !== '' && b.reportType !== '' && a.reportType === b.reportType &&
+        a.vesselName !== '' && b.vesselName !== '' && a.vesselName === b.vesselName
+    );
+    if (!identityMatch) {
+        return { isDuplicate: false, reason: 'different vessel or report type', offsetsCompared: false };
+    }
+
+    if ((a.routeInfo || b.routeInfo) && a.routeInfo !== b.routeInfo) {
+        return { isDuplicate: false, reason: 'different voyage/route information', offsetsCompared: false };
+    }
+
+    const cmp = compareSignatureTimestamps(a, b);
+
+    if (!cmp.sameInstant) {
+        const detail = cmp.offsetsCompared && cmp.deltaHours !== null
+            ? `the complete timestamps differ by ${Math.abs(cmp.deltaHours).toFixed(2)} hrs once the UTC offsets are applied ` +
+              `(${a.date} ${a.time} ${a.utcOffset} vs ${b.date} ${b.time} ${b.utcOffset})`
+            : 'the reported date/time values differ';
+        return { isDuplicate: false, reason: detail, offsetsCompared: cmp.offsetsCompared };
+    }
+
+    return {
+        isDuplicate: true,
+        reason: cmp.offsetsCompared
+            ? 'identical vessel, report type, voyage and complete timestamp (including UTC offset)'
+            : 'identical vessel, report type, voyage and reported date/time (UTC offset not readable on both cards)',
+        offsetsCompared: cmp.offsetsCompared
+    };
 }
 
 function describeSignature(sig) {
@@ -621,11 +1099,29 @@ function checkIsDuplicateReport() {
         return null;
     }
 
+    // v7.4.0 [5]: compare the complete timestamp (including UTC offset), not
+    // just the displayed date/time. Near-misses — same wall clock, different
+    // offset — are logged so the user can see they were considered and
+    // deliberately cleared.
     for (const card of sidebarCards) {
         if (card === currentCard) continue;
         const sig = extractCardSignature(card);
-        if (signaturesMatch(currentSig, sig)) {
-            return { currentSig, matchedSig: sig, matchedCard: card };
+
+        const verdict = signaturesAreDuplicate(currentSig, sig);
+
+        if (verdict.isDuplicate) {
+            return { currentSig, matchedSig: sig, matchedCard: card, reason: verdict.reason };
+        }
+
+        // Same displayed date/time but a different UTC offset — the exact
+        // scenario that used to be misreported as a duplicate.
+        if (currentSig.date === sig.date && currentSig.time === sig.time &&
+            currentSig.vesselName === sig.vesselName && verdict.offsetsCompared) {
+            setStatus(
+                `ℹ️ Timezone check: ${describeSignature(sig)} shows the same wall-clock time but a different UTC ` +
+                `offset (${sig.utcOffset} vs ${currentSig.utcOffset}) — not a duplicate.`,
+                'info'
+            );
         }
     }
 
@@ -796,6 +1292,320 @@ function scrapeTimelineEventRows() {
 }
 
 // ---------------------------------------------------------------------------
+//   v7.4.0 — DETAILED EVENT ROW SCRAPER
+//
+//   Reads the EVENTS grid in DOM order and returns, per row:
+//     eventType, isBlank, the row element, and the Start / End Date-Time
+//     cells (date string, time string, UTC offset, parsed timestamp and the
+//     element to highlight if it needs flagging).
+//
+//   Used by requirements [1] blank-row handling, [6] departure terminal
+//   event, [7] arrival/at-sea conflict and [9] blank End Date/Time.
+// ---------------------------------------------------------------------------
+
+function findEventsBlocks() {
+    const blocks = [];
+    for (const ctx of getAllContexts()) {
+        if (!ctx) continue;
+        for (const fs of Array.from(ctx.querySelectorAll('fieldset'))) {
+            const legend = fs.querySelector('legend');
+            if (legend && (legend.innerText || '').toUpperCase().includes('EVENTS')) {
+                blocks.push(fs);
+            }
+        }
+    }
+    return blocks;
+}
+
+// Accepts DD.MM.YYYY, DD/MM/YYYY, DD-MM-YYYY, YYYY-MM-DD, YYYY/MM/DD.
+// Day-first is assumed for the ambiguous DD/MM vs MM/DD case, matching the
+// GeoEmissions form which renders dates as DD.MM.YYYY.
+function parseFlexibleDate(dateStr) {
+    const s = (dateStr || '').trim();
+    if (!s) return null;
+
+    const parts = s.match(/(\d{1,4})[.\-/](\d{1,2})[.\-/](\d{2,4})/);
+    if (!parts) return null;
+
+    let a = parseInt(parts[1], 10);
+    let b = parseInt(parts[2], 10);
+    let c = parseInt(parts[3], 10);
+    if ([a, b, c].some(isNaN)) return null;
+
+    let year, month, day;
+    if (parts[1].length === 4 || a > 31) {
+        year = a; month = b; day = c;              // YYYY-MM-DD
+    } else {
+        day = a; month = b; year = c;              // DD.MM.YYYY
+        if (year < 100) year += 2000;
+    }
+
+    if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+    return { year, month, day };
+}
+
+function normaliseOffsetString(raw) {
+    const m = (raw || '').match(/([+-])\s*(\d{1,2}):?(\d{2})?/);
+    if (!m) return '';
+    const sign = m[1];
+    const hh   = m[2].padStart(2, '0');
+    const mm   = (m[3] || '00').padStart(2, '0');
+    return `${sign}${hh}:${mm}`;
+}
+
+function eventDateTimeToTimestamp(dateStr, timeStr, offset) {
+    const d = parseFlexibleDate(dateStr);
+    if (!d) return NaN;
+
+    const t = (timeStr || '').match(/(\d{1,2}):(\d{2})/);
+    if (!t) return NaN;
+
+    const iso = `${String(d.year).padStart(4, '0')}-${String(d.month).padStart(2, '0')}-` +
+                `${String(d.day).padStart(2, '0')}T${t[1].padStart(2, '0')}:${t[2]}:00` +
+                (offset || '+00:00');
+
+    const ms = new Date(iso).getTime();
+    return isNaN(ms) ? NaN : ms;
+}
+
+// ---------------------------------------------------------------------------
+//   v7.4.1 — STRUCTURAL CELL CLASSIFICATION  (fixes Start/End Date-Time
+//   being confused with Start/End Latitude)
+//
+//   A Start/End Date-Time cell always contains a date input, a time input,
+//   AND a GMT-offset <select>. A Latitude/Longitude cell is always a single
+//   plain input with a "DD MM' SS\" N/S" (or E/W) placeholder and NEVER has
+//   a <select>. This structural difference is used as the PRIMARY signal —
+//   attribute-name text and header-column index are only used to choose
+//   between structurally-valid candidates, never to override this check.
+//   That way a stale/renamed attribute or a shifted header index can no
+//   longer cause a Lat/Long cell to be mistaken for a Date/Time cell.
+// ---------------------------------------------------------------------------
+
+const DMS_PLACEHOLDER_RE = /DD\s*MM.{0,3}SS/i;
+const DMS_VALUE_RE = /\d+\s*[°]?\s*\d{1,2}['’]?\s*\d{1,2}(?:\.\d+)?\s*["”]?\s*[NSEW]/i;
+
+function cellLooksLikeLatLon(cell) {
+    if (!cell) return false;
+
+    const token = normaliseColumnToken(cell.getAttribute('data-td-name'));
+    if (token.includes('latitude') || token.includes('longitude') ||
+        /(^|[^a-z])lat([^a-z]|$)/.test(token) || /(^|[^a-z])lon([^a-z]|$)/.test(token)) {
+        return true;
+    }
+
+    // A cell with a GMT <select> is never a lat/long cell — short-circuit so
+    // a stray "lat"/"lon" substring elsewhere never excludes a real
+    // Date-Time cell.
+    if (cell.querySelector('select')) return false;
+
+    const input = cell.querySelector('input');
+    if (!input) return false;
+
+    const placeholder = input.getAttribute('placeholder') || '';
+    if (DMS_PLACEHOLDER_RE.test(placeholder)) return true;
+
+    const val = (input.value || '').trim();
+    if (val && DMS_VALUE_RE.test(val)) return true;
+
+    return false;
+}
+
+function cellLooksLikeDateTime(cell) {
+    if (!cell) return false;
+    if (cellLooksLikeLatLon(cell)) return false; // lat/lon always disqualified first
+
+    const hasSelect = !!cell.querySelector('select');
+    if (!hasSelect) return false;
+
+    const inputs = Array.from(cell.querySelectorAll('input')).filter(i => i.type !== 'hidden');
+    return inputs.length >= 1;
+}
+
+// Reads a Start/End Date-Time table cell: date input + time input + GMT select.
+function scrapeDateTimeCell(cell) {
+    const empty = {
+        dateStr: '', timeStr: '', offset: '', raw: '',
+        ts: NaN, hasDate: false, hasTime: false, filled: false, element: cell || null
+    };
+    if (!cell) return empty;
+
+    // v7.4.1: defensive re-check — never extract a date/time out of what is
+    // structurally a Latitude/Longitude cell, even if one somehow reaches
+    // this function.
+    if (cellLooksLikeLatLon(cell)) return empty;
+
+    const inputs = Array.from(cell.querySelectorAll('input')).filter(i => i.type !== 'hidden');
+
+    let dateStr = '';
+    let timeStr = '';
+    let dateEl  = null;
+    let timeEl  = null;
+
+    for (const inp of inputs) {
+        const val = (inp.value || '').trim();
+        if (!val) continue;
+        if (!timeStr && /^\d{1,2}:\d{2}/.test(val)) { timeStr = val; timeEl = inp; continue; }
+        if (!dateStr && /\d{1,4}[.\-/]\d{1,2}[.\-/]\d{2,4}/.test(val)) { dateStr = val; dateEl = inp; }
+    }
+
+    // Positional fallback — first input is the date box, second the time box.
+    if (!dateEl && inputs[0]) dateEl = inputs[0];
+    if (!timeEl && inputs[1]) timeEl = inputs[1];
+
+    let offset = '';
+    const sel = cell.querySelector('select');
+    if (sel) {
+        const opt = sel.options && sel.options[sel.selectedIndex];
+        offset = normaliseOffsetString(opt ? (opt.text || opt.value) : sel.value);
+    }
+
+    const hasDate = !!dateStr;
+    const hasTime = !!timeStr;
+
+    return {
+        dateStr,
+        timeStr,
+        offset,
+        raw: [dateStr, timeStr, offset].filter(Boolean).join(' ').trim(),
+        ts: hasDate && hasTime ? eventDateTimeToTimestamp(dateStr, timeStr, offset) : NaN,
+        hasDate,
+        hasTime,
+        filled: hasDate && hasTime,
+        element: (!hasDate && dateEl) ? dateEl : (!hasTime && timeEl ? timeEl : (dateEl || timeEl || cell))
+    };
+}
+
+// v7.4.1: candidates are restricted to cells that structurally look like a
+// Date-Time cell (select + input). Attribute-name text and the header-index
+// map are used ONLY to choose between those already-qualified candidates —
+// neither can promote a Lat/Long cell into being treated as Start/End
+// Date-Time, no matter how the site names or orders its columns.
+function locateDateTimeCells(row, headerMap) {
+    const cells = Array.from(row.querySelectorAll('td'));
+
+    const candidates = [];
+    cells.forEach((cell, idx) => {
+        if (cellLooksLikeDateTime(cell)) candidates.push({ cell, idx });
+    });
+
+    if (candidates.length === 0) return { startCell: null, endCell: null };
+
+    function tokenSaysStart(cell) {
+        const token = normaliseColumnToken(cell.getAttribute('data-td-name'));
+        return token.includes('start') && (token.includes('time') || token.includes('date'));
+    }
+    function tokenSaysEnd(cell) {
+        const token = normaliseColumnToken(cell.getAttribute('data-td-name'));
+        return token.includes('end') && (token.includes('time') || token.includes('date'));
+    }
+
+    let startCell = (candidates.find(c => tokenSaysStart(c.cell)) || {}).cell || null;
+    let endCell   = (candidates.find(c => tokenSaysEnd(c.cell))   || {}).cell || null;
+
+    // Header-index tiebreak — but only among the structurally-valid
+    // candidates. If headerMap.endCol happens to point at a Lat/Long column
+    // (e.g. because of a shifted/stale header map), no candidate will have
+    // that idx, so this simply finds nothing and falls through safely.
+    if (headerMap) {
+        if (!startCell) {
+            const m = candidates.find(c => c.idx === headerMap.startCol);
+            if (m) startCell = m.cell;
+        }
+        if (!endCell) {
+            const m = candidates.find(c => c.idx === headerMap.endCol);
+            if (m) endCell = m.cell;
+        }
+    }
+
+    // DOM-order fallback — Start Date/Time always precedes End Date/Time.
+    if ((!startCell || !endCell) && candidates.length >= 2) {
+        const sorted = candidates.slice().sort((a, b) => a.idx - b.idx);
+        if (!startCell) startCell = sorted[0].cell;
+        if (!endCell)   endCell   = sorted[sorted.length - 1].cell;
+    } else if (!startCell && candidates.length === 1) {
+        // Only one Date-Time-looking cell on the row — treat it as Start
+        // rather than guessing; End stays unresolved (reported as missing).
+        startCell = candidates[0].cell;
+    }
+
+    // Never let the same cell serve as both Start and End.
+    if (startCell && startCell === endCell) endCell = null;
+
+    return { startCell, endCell };
+}
+
+function buildEventHeaderMap(block) {
+    const headerRow = Array.from(block.querySelectorAll('tr')).find(tr => {
+        const txt = (tr.innerText || '').toUpperCase().replace(/\s+/g, ' ');
+        return txt.includes('START DATE') || txt.includes('END DATE');
+    });
+    if (!headerRow) return null;
+
+    const cells = Array.from(headerRow.querySelectorAll('th, td'));
+    let startCol = -1;
+    let endCol   = -1;
+
+    cells.forEach((c, idx) => {
+        const txt = (c.innerText || '').toUpperCase().replace(/\s+/g, ' ').trim();
+        if (startCol < 0 && txt.includes('START DATE')) startCol = idx;
+        if (endCol   < 0 && txt.includes('END DATE'))   endCol   = idx;
+    });
+
+    if (startCol < 0 && endCol < 0) return null;
+    return { startCol, endCol };
+}
+
+function scrapeEventRows() {
+    const rows = [];
+    const seenRowElements = new Set();
+
+    for (const block of findEventsBlocks()) {
+        const headerMap = buildEventHeaderMap(block);
+
+        const candidateRows = Array.from(block.querySelectorAll('tr'));
+        for (const tr of candidateRows) {
+            if (seenRowElements.has(tr)) continue;
+
+            const selectEl = tr.querySelector(
+                'select[id*="eventtypes" i], select[name*="eventtypes" i], ' +
+                'select[data-td-name*="eventtypes" i], select#gsinporteventtypes'
+            );
+            if (!selectEl) continue;
+
+            seenRowElements.add(tr);
+
+            const selectedText = (
+                selectEl.options && selectEl.options[selectEl.selectedIndex]
+                    ? selectEl.options[selectEl.selectedIndex].text
+                    : ''
+            ).trim();
+
+            const isBlank =
+                !selectedText ||
+                selectedText.toLowerCase().includes('select') ||
+                selectEl.selectedIndex === 0;
+
+            const { startCell, endCell } = locateDateTimeCells(tr, headerMap);
+
+            rows.push({
+                index: rows.length,
+                eventType: selectedText,
+                normalisedEventType: selectedText.trim().toUpperCase().replace(/\s+/g, ' '),
+                isBlank,
+                rowEl: tr,
+                selectEl,
+                block,
+                start: scrapeDateTimeCell(startCell),
+                end:   scrapeDateTimeCell(endCell)
+            });
+        }
+    }
+
+    return rows;
+}
+
+// ---------------------------------------------------------------------------
 //   EVENT BLOCK FUEL ROB VALIDATION  (v7.1.2 — Validation Check #5)
 //
 //   Reads the per-fuel-type ROB Start / ROB End sub-grid that appears
@@ -904,65 +1714,113 @@ function validateEventFuelBlock(fuelRows) {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-//   AUTO-DELETE BLANK EVENT ROWS  (v7.2.1)
+//   v7.4.0 [1] — CONDITIONAL AUTO-DELETE OF BLANK EVENT ROWS
 //
-//   When the EVENTS grid contains a row with no event type selected
-//   ("Select a Event Types"), finds the delete button (name="delBtn") in
-//   that row's Actions column and clicks it, then returns how many rows
-//   were deleted so the caller can re-validate.
+//   A blank event row is deleted automatically ONLY when BOTH hold:
+//     1. Vessel status is "At Sea", AND
+//     2. No fuel consumption is recorded under ANY of the purpose columns
+//        Propulsion · Maneuver · Generator · L/D · Deballast · IGS · Boiler
+//
+//   Otherwise the row is preserved:
+//     • Not At Sea (In Port / Arrival / Departure) → the check does not apply
+//       at all; the blank row stays exactly as it is.
+//     • At Sea with consumption → real fuel means a real operational event
+//       occurred, so the row must be documented, not deleted. Autopilot
+//       raises a manual-review warning naming the purpose column(s) involved.
+//
+//   Returns:
+//     { outcome, deleted, purposesWithConsumption, message }
+//   outcome ∈ 'no-blank-rows' | 'deleted' | 'preserved-not-at-sea'
+//             | 'blocked-consumption' | 'no-delete-control'
 // ---------------------------------------------------------------------------
 
-async function deleteBlankEventRows() {
-    let deleted = 0;
+async function evaluateBlankEventRows() {
+    const blankRows = scrapeEventRows().filter(r => r.isBlank);
 
-    for (const ctx of getAllContexts()) {
-        if (!ctx) continue;
-
-        // Find all event-type dropdowns — both at-sea and in-port variants
-        const dropdowns = Array.from(ctx.querySelectorAll(
-            'select[id*="eventtypes" i], select[name*="eventtypes" i], ' +
-            'select[data-td-name*="eventtypes" i], select#gsinporteventtypes'
-        ));
-
-        for (const sel of dropdowns) {
-            const selectedText = (
-                sel.options[sel.selectedIndex]
-                    ? sel.options[sel.selectedIndex].text
-                    : ''
-            ).trim();
-
-            const isBlank =
-                !selectedText ||
-                selectedText.toLowerCase().includes('select') ||
-                selectedText === '' ||
-                sel.selectedIndex === 0;
-
-            if (!isBlank) continue;
-
-            // Walk up to the containing <tr> and find the delete button
-            const row = sel.closest('tr');
-            if (!row) continue;
-
-            const delBtn = row.querySelector(
-                'button[name="delBtn"], button.tblBtn[onclick*="removeFromCopy"]'
-            );
-
-            if (delBtn) {
-                setStatus(`🗑️ Auto-deleting blank event row (no event type selected)...`, 'warning');
-                delBtn.click();
-                await sleep(400);
-                deleted++;
-            }
-        }
+    if (blankRows.length === 0) {
+        return { outcome: 'no-blank-rows', deleted: 0, purposesWithConsumption: [], message: '' };
     }
 
-    return deleted;
+    // ── Condition 1: vessel status must be At Sea ────────────────────────
+    const atSea = isVesselAtSea();
+    if (!atSea) {
+        const statusText = getVesselStatusText() || 'not readable — treated as not At Sea';
+        const message =
+            `${blankRows.length} blank event row(s) left untouched: vessel status is "${statusText}", ` +
+            `not "At Sea". The blank-row auto-delete check only applies to At Sea reports.`;
+        return { outcome: 'preserved-not-at-sea', deleted: 0, purposesWithConsumption: [], message };
+    }
+
+    // ── Condition 2: no consumption under any purpose column ─────────────
+    const fuel = getPurposeFuelConsumptionTotals();
+
+    setStatus(
+        `⛽ Purpose fuel scan (${fuel.tablesScanned} table(s), columns found: ` +
+        `${fuel.columnsFound.length ? fuel.columnsFound.join(', ') : 'none'}) — ` +
+        Object.entries(fuel.totals).map(([p, v]) => `${p}=${v}`).join('  '),
+        'info'
+    );
+
+    if (fuel.purposesWithConsumption.length > 0) {
+        const detail = fuel.purposesWithConsumption
+            .map(p => `${p} (${fuel.totals[p]})`)
+            .join(', ');
+        const message =
+            `Blank event row cannot be deleted because fuel consumption was recorded for ` +
+            `${formatPurposeList(fuel.purposesWithConsumption)}. ` +
+            `Please review and document the operational event. Recorded consumption: ${detail}.`;
+        return {
+            outcome: 'blocked-consumption',
+            deleted: 0,
+            purposesWithConsumption: fuel.purposesWithConsumption,
+            message
+        };
+    }
+
+    // ── Both conditions satisfied → safe to delete ───────────────────────
+    let deleted = 0;
+    let missingControl = 0;
+
+    for (const row of blankRows) {
+        const delBtn = row.rowEl.querySelector(
+            'button[name="delBtn"], button.tblBtn[onclick*="removeFromCopy"]'
+        );
+
+        if (!delBtn) { missingControl++; continue; }
+
+        setStatus('🗑️ At Sea with zero purpose-column consumption — auto-deleting blank event row...', 'warning');
+        delBtn.click();
+        await sleep(400);
+        deleted++;
+    }
+
+    if (deleted === 0 && missingControl > 0) {
+        return {
+            outcome: 'no-delete-control',
+            deleted: 0,
+            purposesWithConsumption: [],
+            message:
+                `${missingControl} blank event row(s) found with no delete control available. ` +
+                `The row cannot be removed automatically — please review it manually.`
+        };
+    }
+
+    return {
+        outcome: 'deleted',
+        deleted,
+        purposesWithConsumption: [],
+        message: `${deleted} blank event row(s) deleted (At Sea, no purpose-column fuel consumption recorded).`
+    };
 }
 
 function validatePortEvents() {
     let portLayoutDetected = false;
     let containsInvalidEvent = false;
     let invalidEventName = '';
+    // v7.4.0 [1]: blank rows are counted separately from genuinely
+    // unapproved events. A blank row is not an "unapproved event scenario" —
+    // it is handled by the conditional auto-delete rules instead.
+    let blankRowCount = 0;
 
     for (const ctx of getAllContexts()) {
         if (!ctx) continue;
@@ -1001,6 +1859,13 @@ function validatePortEvents() {
 
             if (!upperText) continue;
 
+            // v7.4.0 [1]: placeholder / blank selection — not an unapproved
+            // event. Counted separately and handled by the blank-row rules.
+            if (upperText.includes('SELECT') || selectEl.selectedIndex === 0) {
+                blankRowCount++;
+                continue;
+            }
+
             const isApproved = CONFIG.APPROVED_PORT_EVENTS.some(approvedEvent =>
                 upperText.includes(approvedEvent.toUpperCase())
             );
@@ -1015,9 +1880,259 @@ function validatePortEvents() {
         }
     }
 
-    if (!portLayoutDetected) return { status: 'SEA' };
-    if (containsInvalidEvent) return { status: 'INVALID', event: invalidEventName };
-    return { status: 'VALID_PORT' };
+    if (!portLayoutDetected) return { status: 'SEA', blankRowCount };
+    if (containsInvalidEvent) return { status: 'INVALID', event: invalidEventName, blankRowCount };
+    return { status: 'VALID_PORT', blankRowCount };
+}
+
+// ---------------------------------------------------------------------------
+//   v7.4.0 [9] — EVENT END DATE/TIME MUST NOT BE BLANK
+//
+//   Every event row that has an event type selected must carry a complete
+//   End Date/Time. A blank (or half-filled) End Date/Time halts Autopilot
+//   immediately, highlights the offending field and scrolls it into view.
+//
+//   Blank rows (no event type selected) are excluded — they are governed by
+//   the blank-row rules in requirement [1].
+// ---------------------------------------------------------------------------
+
+function validateEventEndDateTimes(eventRows) {
+    const result = { errors: [], checked: 0 };
+    const rows = eventRows || scrapeEventRows();
+
+    for (const row of rows) {
+        if (row.isBlank) continue;
+        result.checked++;
+
+        if (row.end.filled) {
+            if (row.end.element && row.end.element.style) {
+                row.end.element.style.cssText = FIELD_STYLES.SUCCESS_NOBG;
+            }
+            continue;
+        }
+
+        let missingPart;
+        if (!row.end.hasDate && !row.end.hasTime) missingPart = 'End Date/Time is missing';
+        else if (!row.end.hasDate)                missingPart = 'the End Date part is missing';
+        else                                      missingPart = 'the End Time part is missing';
+
+        const target = row.end.element || row.rowEl;
+        if (target && target.style) target.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+        if (row.rowEl && row.rowEl.style) row.rowEl.style.outline = '3px solid #f44336';
+
+        scrollToIssueElement(
+            target,
+            `Event ${row.index + 1} [${row.eventType}] is missing its End Date/Time.`
+        );
+
+        result.errors.push(
+            `Validation failed: End Date/Time is missing for event ${row.index + 1} ` +
+            `[${row.eventType}]${row.start.filled ? ` starting ${row.start.raw}` : ''} — ${missingPart}. ` +
+            `Please enter the End Date/Time before continuing.`
+        );
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+//   v7.4.0 [6] — DEPARTURE REPORT: FINAL EVENT VALIDATION
+//
+//   On a Departure report the last event in the sequence must be
+//   "SHIFTING FROM LAST BERTH TO SEA". Validates that the event exists, that
+//   it is the last one, and that nothing follows it.
+// ---------------------------------------------------------------------------
+
+function isDepartureReportContext(reportContext, currentSig) {
+    if (reportContext && reportContext.isDepartureReport) return true;
+    if (reportContext && /departure/i.test(reportContext.reportType || '')) return true;
+    if (currentSig && /departure/i.test(currentSig.reportType || '')) return true;
+    return false;
+}
+
+function validateDepartureFinalEvent(eventRows) {
+    const result = { errors: [], applicable: true };
+
+    const rows = (eventRows || scrapeEventRows()).filter(r => !r.isBlank);
+
+    if (rows.length === 0) {
+        result.errors.push(
+            `Departure Report validation failed: no events are recorded, so the required final event ` +
+            `"${CONFIG.DEPARTURE_FINAL_EVENT}" is missing.`
+        );
+        return result;
+    }
+
+    const aliases = CONFIG.DEPARTURE_FINAL_EVENT_ALIASES.map(a => a.toUpperCase());
+    const matchIndexes = rows
+        .map((r, i) => (aliases.some(a => r.normalisedEventType.includes(a)) ? i : -1))
+        .filter(i => i >= 0);
+
+    if (matchIndexes.length === 0) {
+        const listed = rows.map((r, i) => `${i + 1}. ${r.eventType}`).join(' | ');
+        if (rows.length) {
+            const last = rows[rows.length - 1];
+            if (last.selectEl && last.selectEl.style) last.selectEl.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+            scrollToIssueElement(last.selectEl || last.rowEl, 'Departure report is missing its final event.');
+        }
+        result.errors.push(
+            `Departure Report validation failed: the required final event "${CONFIG.DEPARTURE_FINAL_EVENT}" ` +
+            `was not found. Events currently recorded: ${listed}.`
+        );
+        return result;
+    }
+
+    const lastMatch  = matchIndexes[matchIndexes.length - 1];
+    const trailing   = rows.slice(lastMatch + 1);
+
+    if (trailing.length > 0) {
+        const offenders = trailing.map((r, i) => `${lastMatch + 2 + i}. ${r.eventType}`).join(' | ');
+        trailing.forEach(r => {
+            if (r.selectEl && r.selectEl.style) r.selectEl.style.cssText = FIELD_STYLES.ERROR_HEX_FULL;
+        });
+        scrollToIssueElement(
+            trailing[0].selectEl || trailing[0].rowEl,
+            'Unexpected event recorded after "Shifting from Last Berth to Sea".'
+        );
+        result.errors.push(
+            `Departure Report validation failed: "${CONFIG.DEPARTURE_FINAL_EVENT}" must be the LAST event, ` +
+            `but ${trailing.length} event(s) appear after it — ${offenders}. ` +
+            `Remove or re-order the trailing event(s) so the departure ends at the shift to sea.`
+        );
+        return result;
+    }
+
+    if (matchIndexes.length > 1) {
+        result.errors.push(
+            `Departure Report validation failed: "${CONFIG.DEPARTURE_FINAL_EVENT}" appears ${matchIndexes.length} ` +
+            `times in the event sequence (rows ${matchIndexes.map(i => i + 1).join(', ')}). ` +
+            `It must appear exactly once, as the final event.`
+        );
+        return result;
+    }
+
+    const finalRow = rows[lastMatch];
+    if (finalRow.selectEl && finalRow.selectEl.style) {
+        finalRow.selectEl.style.cssText = FIELD_STYLES.SUCCESS_NOBG;
+    }
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+//   v7.4.0 [7] — ARRIVAL / AT SEA EVENT CONFLICT
+//
+//   Events are indexed per report as the run progresses. If the same event
+//   turns up in both an Arrival report and an At Sea report for the same
+//   vessel, that is a data conflict requiring the user — Autopilot halts and
+//   names the event and both reports.
+//
+//   "Same event" = same event type AND (identical start timestamps within
+//   EVENT_MATCH_TOLERANCE_MS, or overlapping start→end windows).
+// ---------------------------------------------------------------------------
+
+const ReportEventIndex = {
+    entries: []   // { key, label, vessel, category, events: [{type,startTs,endTs,raw}] }
+};
+window.__autopilotEventIndex = ReportEventIndex;
+
+function resetReportEventIndex() {
+    ReportEventIndex.entries = [];
+}
+
+function categoriseReportForEventConflict(reportContext, currentSig) {
+    const typeText = [
+        currentSig ? currentSig.reportType : '',
+        reportContext ? reportContext.reportType : ''
+    ].join(' ').toLowerCase();
+
+    // Departure reports legitimately mix port and sea events, so they are
+    // excluded from this comparison.
+    if (/departure/.test(typeText)) return 'departure';
+    if (/arrival/.test(typeText))   return 'arrival';
+    if (/sea|noon/.test(typeText))  return 'at-sea';
+    if (/port/.test(typeText))      return 'in-port';
+    return 'other';
+}
+
+function eventsAreSameOccurrence(a, b) {
+    if (a.type !== b.type) return false;
+
+    const tol = CONFIG.EVENT_MATCH_TOLERANCE_MS;
+
+    if (!isNaN(a.startTs) && !isNaN(b.startTs) && Math.abs(a.startTs - b.startTs) <= tol) {
+        return { matchType: 'identical start time' };
+    }
+
+    const aEnd = !isNaN(a.endTs) ? a.endTs : a.startTs;
+    const bEnd = !isNaN(b.endTs) ? b.endTs : b.startTs;
+
+    if (!isNaN(a.startTs) && !isNaN(b.startTs) && !isNaN(aEnd) && !isNaN(bEnd)) {
+        if (a.startTs < bEnd && b.startTs < aEnd) {
+            return { matchType: 'overlapping time window' };
+        }
+    }
+
+    return false;
+}
+
+// Records the current report's events and returns any Arrival ↔ At Sea
+// conflicts found against reports already seen in this run.
+function recordAndCheckArrivalSeaEventConflicts(reportContext, currentSig, eventRows) {
+    const result = { errors: [], recorded: 0 };
+
+    const category = categoriseReportForEventConflict(reportContext, currentSig);
+    if (category !== 'arrival' && category !== 'at-sea') return result;
+
+    const rows = (eventRows || scrapeEventRows()).filter(r => !r.isBlank);
+    const events = rows.map(r => ({
+        type:    r.normalisedEventType,
+        display: r.eventType,
+        startTs: r.start.ts,
+        endTs:   r.end.ts,
+        raw:     r.start.raw || '(no start time)'
+    }));
+
+    const key    = sigKey(currentSig);
+    const label  = currentSig ? describeSignature(currentSig) : (reportContext.reportType || 'current report');
+    const vessel = currentSig ? currentSig.vesselName : '';
+
+    const counterpart = category === 'arrival' ? 'at-sea' : 'arrival';
+
+    for (const prior of ReportEventIndex.entries) {
+        if (prior.key === key) continue;
+        if (prior.category !== counterpart) continue;
+        if (vessel && prior.vessel && vessel !== prior.vessel) continue;
+
+        for (const ev of events) {
+            for (const priorEv of prior.events) {
+                const match = eventsAreSameOccurrence(ev, priorEv);
+                if (!match) continue;
+
+                const arrivalLabel = category === 'arrival' ? label : prior.label;
+                const seaLabel     = category === 'arrival' ? prior.label : label;
+
+                result.errors.push(
+                    `Validation stopped: Event "${ev.display}" exists in both the Arrival Report and the ` +
+                    `At Sea Report (${match.matchType}). ` +
+                    `Arrival Report: ${arrivalLabel}. At Sea Report: ${seaLabel}. ` +
+                    `Event window: ${ev.raw}. ` +
+                    `Please review the conflicting event before continuing.`
+                );
+            }
+        }
+    }
+
+    // Index this report regardless, so the counterpart report can be checked
+    // against it when it is processed.
+    const existing = ReportEventIndex.entries.find(e => e.key === key);
+    if (existing) {
+        existing.events = events;
+    } else {
+        ReportEventIndex.entries.push({ key, label, vessel, category, events });
+    }
+    result.recorded = events.length;
+
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -1248,9 +2363,13 @@ function runSequenceAndContinuityChecks(crossReportData) {
                     `(minimum ${CONFIG.REPORT_INTERVAL_MIN_HOURS} hr) — possible duplicate or misdated report.`
                 );
             } else if (hoursDiff > CONFIG.REPORT_INTERVAL_MAX_HOURS) {
+                // v7.3.0: Report Time Gap Validation — gap > 26 hrs between
+                // consecutive reports means Autopilot must halt immediately
+                // and wait for user intervention rather than skip/bypass.
                 result.errors.push(
-                    `Reporting Period Violation: interval since previous report is ${hoursDiff.toFixed(2)} hrs, ` +
-                    `exceeding the maximum allowed ${CONFIG.REPORT_INTERVAL_MAX_HOURS} hrs — a report may be missing.`
+                    `Report Time Gap Violation: interval since previous report is ${hoursDiff.toFixed(2)} hrs, ` +
+                    `exceeding the maximum allowed ${CONFIG.REPORT_INTERVAL_MAX_HOURS} hrs — Autopilot halted ` +
+                    `immediately, awaiting user intervention. A report may be missing.`
                 );
             }
         }
@@ -2438,7 +3557,10 @@ async function verifyApprovalAndRetry(targetSig, fallbackCard, attempt = 0) {
     await navigateBackToReport(targetSig, fallbackCard);
 
     const reApproved = await approveReport();
-    // 'already approved' (true) or success (true) both continue; only explicit false halts
+    // 'already approved' (true) or success (true) both continue; only explicit false halts.
+    // v7.4.0 [2]: a 'retry' sentinel is transient — surface it to the caller
+    // so the main loop retries the report instead of stopping the bot.
+    if (reApproved === 'retry') return 'retry';
     if (reApproved === false) return false;
 
     return verifyApprovalAndRetry(targetSig, fallbackCard, attempt + 1);
@@ -2490,9 +3612,11 @@ async function ensureOnCurrentReport(currentSig, fallbackCard) {
             return true;
         }
 
-        // Genuinely on the wrong page and can't recover — only halt here.
-        setStatus('🛑 Pre-approval guard: navigated to wrong report and could not recover. Halting.', 'error');
-        return false;
+        // Genuinely on the wrong page. v7.4.0 [2]: this is a navigation
+        // problem, not a data problem — signal a retry so the loop can
+        // re-navigate rather than leaving the bot stopped.
+        setStatus('⚠️ Pre-approval guard: not on the expected report — retrying navigation.', 'warning');
+        return 'retry';
     }
 
     return true;
@@ -2508,7 +3632,7 @@ async function ensureOnCurrentReport(currentSig, fallbackCard) {
 
 async function validateCurrentReport(crossReportData) {
     clearStatus();
-    setStatus('Initiating Smart Sandbox Scan (v7.2.6)...', 'info');
+    setStatus('Initiating Smart Sandbox Scan (v7.4.2)...', 'info');
     await sleep(CONFIG.SLEEP_INIT_MS);
 
     if (isCurrentReportAlreadyApproved()) {
@@ -2537,21 +3661,31 @@ async function validateCurrentReport(crossReportData) {
             setStatus(`   Current report: ${describeSignature(currentSig)}`, 'info');
             setStatus(`   Matched (already rejected): ${describeSignature(matchedSig)}`, 'info');
         } else {
-            setStatus('🛑 LOCKOUT: Duplicate report detected.', 'error');
-            setStatus(`   Current report:  ${describeSignature(currentSig)}`, 'error');
-            setStatus(`   Matches existing report:  ${describeSignature(matchedSig)}`, 'error');
+            // v7.3.0: Duplicate Report Rejection — a duplicate is an
+            // expected, self-resolving outcome, not a fatal error.
+            // Autopilot auto-rejects it with an explanation and then
+            // continues straight on to the next report; it must NOT pause
+            // or wait for the user to manually restart/resume.
+            setStatus('⚠️ Duplicate report detected — auto-rejecting and continuing (recoverable result, not a halt).', 'warning');
+            setStatus(`   Current report:  ${describeSignature(currentSig)} ${currentSig.utcOffset || ''}`, 'warning');
+            setStatus(`   Matches existing report:  ${describeSignature(matchedSig)} ${matchedSig.utcOffset || ''}`, 'warning');
+            setStatus(`   Basis: ${duplicateMatch.reason || 'complete timestamp match'}`, 'warning');
 
             const rejectionMessage =
-                `Duplicate Report Detected: this report (${describeSignature(currentSig)}) ` +
-                `matches an existing report already on file (${describeSignature(matchedSig)}).`;
+                `Duplicate Report Detected: this report (${describeSignature(currentSig)} ${currentSig.utcOffset || ''}) ` +
+                `matches an existing report already on file (${describeSignature(matchedSig)} ${matchedSig.utcOffset || ''}). ` +
+                `Basis: ${duplicateMatch.reason || 'complete timestamp match'}.`;
 
             const rejected = await rejectReportAsDuplicate(rejectionMessage);
             if (rejected) {
-                setStatus('✅ Report rejected automatically with duplicate explanation. Halted for review.', 'warning');
+                setStatus('✅ Report rejected automatically with duplicate explanation. Continuing to next report...', 'success');
             } else {
-                setStatus('⚠️ Could not complete automatic rejection — manual review required. Halted.', 'error');
+                setStatus('⚠️ Automatic rejection did not complete cleanly — continuing to next report anyway (no pause).', 'warning');
             }
-            return false;
+            // Sentinel value (not boolean) tells the caller: this was not a
+            // failure — skip navigation-blocking logic and move straight to
+            // the next report without halting Autopilot.
+            return 'duplicate-skip';
         }
     } else {
         setStatus('✅ Duplicate Scan: No matching duplicate found in the report list.', 'success');
@@ -2561,30 +3695,52 @@ async function validateCurrentReport(crossReportData) {
     setStatus('Analyzing active operational event parameters...', 'info');
     let eventCheck = validatePortEvents();
 
-    if (eventCheck.status === 'INVALID') {
-        // v7.2.1: if the invalid event is a blank/placeholder row
-        // ("Select a Event Types"), auto-delete it and re-validate
-        // instead of locking out.
-        const isBlankRow =
-            !eventCheck.event ||
-            eventCheck.event.trim() === '' ||
-            eventCheck.event.toLowerCase().includes('select');
+    // v7.4.0 [1]: blank rows are no longer treated as an unapproved event.
+    // They are resolved by the conditional auto-delete rules below.
+    if (eventCheck.blankRowCount > 0) {
+        setStatus(`⚠️ ${eventCheck.blankRowCount} blank event row(s) detected — applying conditional auto-delete rules...`, 'warning');
 
-        if (isBlankRow) {
-            setStatus(`⚠️ Blank event row detected — attempting auto-delete...`, 'warning');
-            const deletedCount = await deleteBlankEventRows();
-            if (deletedCount > 0) {
-                setStatus(`✅ ${deletedCount} blank event row(s) deleted — re-running event check...`, 'success');
+        const blankResult = await evaluateBlankEventRows();
+
+        switch (blankResult.outcome) {
+            case 'deleted':
+                setStatus(`✅ ${blankResult.message} Re-running event check...`, 'success');
                 await sleep(CONFIG.SLEEP_POST_CLICK_MS);
                 eventCheck = validatePortEvents();
-            }
-        }
+                break;
 
-        if (eventCheck.status === 'INVALID') {
-            isValid = false;
-            setStatus(`🛑 LOCKOUT: Unapproved event scenario detected [${eventCheck.event}]. Halted.`, 'error');
-            return false;
+            case 'preserved-not-at-sea':
+                // In Port / Arrival / Departure — leave the row exactly as-is
+                // and do NOT treat it as a lockout.
+                setStatus(`ℹ️ ${blankResult.message}`, 'info');
+                break;
+
+            case 'blocked-consumption':
+                // Real fuel consumption means a real operational event took
+                // place. Preserve the row and stop for manual review.
+                setStatus(`🛑 ${blankResult.message}`, 'error');
+                errors.push(blankResult.message);
+                haltForUser(blankResult.message);
+                return false;
+
+            case 'no-delete-control':
+                setStatus(`🛑 ${blankResult.message}`, 'error');
+                errors.push(blankResult.message);
+                haltForUser(blankResult.message);
+                return false;
+
+            default:
+                break;
         }
+    }
+
+    if (eventCheck.status === 'INVALID') {
+        isValid = false;
+        const lockoutMsg = `Unapproved event scenario detected [${eventCheck.event}].`;
+        errors.push(lockoutMsg);
+        setStatus(`🛑 LOCKOUT: ${lockoutMsg} Halted.`, 'error');
+        haltForUser(lockoutMsg);
+        return false;
     }
 
     if (eventCheck.status === 'VALID_PORT') {
@@ -2724,9 +3880,45 @@ async function validateCurrentReport(crossReportData) {
 
         // ── WITHIN-REPORT ROB INTEGRITY CHECK ───────────────────────────────
         let withinReportFailed = false;
-        setStatus('Verifying within-report ROB integrity (Last ROB = ROB Start)...', 'info');
+        let negativeRobDetected = false;
+        setStatus('Verifying within-report ROB integrity (Last ROB = ROB Start, no negative values)...', 'info');
 
         currentBunkerCheck.forEach(curr => {
+            // ── v7.4.0 [4] NEGATIVE VALUE CHECK ─────────────────────────────
+            // Last ROB, ROB Start and Adjustment must never be negative. This
+            // runs BEFORE the blank/zero skip logic so a negative value can
+            // never slip through on an otherwise-skipped row.
+            const negativeFields = [];
+            if (curr.lastRob  !== null && curr.lastRob  < 0) {
+                negativeFields.push({ name: 'Last ROB',   value: curr.lastRob,  el: curr.lastRobInput });
+            }
+            if (curr.robStart !== null && curr.robStart < 0) {
+                negativeFields.push({ name: 'ROB Start',  value: curr.robStart, el: curr.robStartInput });
+            }
+            if (curr.hasAdjColumn && curr.adj !== null && curr.adj < 0) {
+                negativeFields.push({ name: 'Adjustment', value: curr.adj,      el: curr.adjElementToHighlight || curr.adjInput });
+            }
+
+            if (negativeFields.length > 0) {
+                negativeFields.forEach(f => {
+                    if (f.el && f.el.style) f.el.style.cssText = FIELD_STYLES.ERROR_KEYWORD_FULL;
+                    const msg =
+                        `Validation failed: BUNKERS ROB contains a negative value in \`${f.name}\` ` +
+                        `(${f.value}) on row [${curr.displayLabel}]. ` +
+                        `Last ROB, ROB Start and Adjustment must never be negative.`;
+                    errors.push(msg);
+                    setStatus(`🛑 ${msg}`, 'error');
+                });
+                scrollToIssueElement(
+                    negativeFields[0].el,
+                    `Negative ${negativeFields[0].name} value found in row [${curr.displayLabel}].`
+                );
+                isValid = false;
+                withinReportFailed = true;
+                negativeRobDetected = true;
+                return;
+            }
+
             if (curr.lastRob === null && curr.robStart === null) {
                 setStatus(`ℹ️ ROB Check [${curr.displayLabel}]: No values entered — skipping.`, 'info');
                 return;
@@ -2800,9 +3992,12 @@ async function validateCurrentReport(crossReportData) {
         });
 
         if (withinReportFailed) {
+            if (negativeRobDetected) {
+                setStatus('🛑 BUNKERS ROB negative-value validation FAILED — the flagged field(s) above must be corrected.', 'error');
+            }
             setStatus('🛑 Within-Report ROB Integrity FAILED — halting.', 'error');
         } else {
-            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB = ROB Start).', 'success');
+            setStatus('✅ Within-Report ROB Integrity: All rows pass (Last ROB = ROB Start, no negative values).', 'success');
         }
     }
 
@@ -2848,6 +4043,59 @@ async function validateCurrentReport(crossReportData) {
         setStatus('ℹ️ No active event grid objects extracted to check scenario state cascades.', 'info');
     }
 
+    // ── 5b. v7.4.0 EVENT-LEVEL VALIDATIONS ──────────────────────────────────
+    const detailedEventRows = scrapeEventRows();
+    const currentSigForEvents = (crossReportData && crossReportData.currentSig) || null;
+
+    // [9] End Date/Time must not be blank — halts immediately.
+    setStatus('Verifying every event has an End Date/Time...', 'info');
+    const endTimeResult = validateEventEndDateTimes(detailedEventRows);
+    if (endTimeResult.errors.length > 0) {
+        endTimeResult.errors.forEach(err => {
+            errors.push(`[Event End Date/Time] ${err}`);
+            setStatus(`🛑 ${err}`, 'error');
+        });
+        haltForUser(endTimeResult.errors[0]);
+        return false;
+    }
+    setStatus(
+        endTimeResult.checked > 0
+            ? `✅ End Date/Time present on all ${endTimeResult.checked} event(s).`
+            : 'ℹ️ End Date/Time check: no events with a selected event type on this report.',
+        endTimeResult.checked > 0 ? 'success' : 'info'
+    );
+
+    // [6] Departure report — final event must be SHIFTING FROM LAST BERTH TO SEA.
+    if (isDepartureReportContext(reportContext, currentSigForEvents)) {
+        setStatus('Departure report detected — verifying the final event in the sequence...', 'info');
+        const departureResult = validateDepartureFinalEvent(detailedEventRows);
+        if (departureResult.errors.length > 0) {
+            departureResult.errors.forEach(err => {
+                errors.push(`[Departure Final Event] ${err}`);
+                setStatus(`🛑 ${err}`, 'error');
+            });
+            haltForUser(departureResult.errors[0]);
+            return false;
+        }
+        setStatus(`✅ Departure sequence ends correctly with "${CONFIG.DEPARTURE_FINAL_EVENT}".`, 'success');
+    }
+
+    // [7] The same event must not appear in both an Arrival and an At Sea report.
+    const conflictResult = recordAndCheckArrivalSeaEventConflicts(
+        reportContext, currentSigForEvents, detailedEventRows
+    );
+    if (conflictResult.errors.length > 0) {
+        conflictResult.errors.forEach(err => {
+            errors.push(`[Arrival/At Sea Conflict] ${err}`);
+            setStatus(`🛑 ${err}`, 'error');
+        });
+        haltForUser(conflictResult.errors[0]);
+        return false;
+    }
+    if (conflictResult.recorded > 0) {
+        setStatus(`✅ Arrival/At Sea cross-check: ${conflictResult.recorded} event(s) indexed, no conflicts found.`, 'success');
+    }
+
     // v7.1.2 — Sequential Date / Reporting Period / Voyage Continuity checks
     setStatus('Running sequence, period, and voyage continuity checks...', 'info');
     const sequenceResult = runSequenceAndContinuityChecks(crossReportData);
@@ -2880,7 +4128,9 @@ async function validateCurrentReport(crossReportData) {
     await sleep(CONFIG.SLEEP_POLL_MS);
 
     if (!isValid) {
-        setStatus('🛑 LOCKOUT: Validation errors caught. Autopilot halted.', 'error');
+        setStatus(`🛑 LOCKOUT: ${errors.length} validation error(s) caught on this report:`, 'error');
+        errors.forEach((e, i) => setStatus(`   ${i + 1}. ${e}`, 'error'));
+        haltForUser(errors[0] || 'Validation errors detected on this report.');
     } else {
         setStatus('🎉 All system safety checks cleared successfully.', 'success');
     }
@@ -2913,12 +4163,24 @@ async function approveReport() {
             setStatus('⚠️ File is already approved. Proceeding to skip forward...', 'warning');
             return 'skipped';
         }
-        setStatus('❌ Submission button context link unreadable.', 'error');
-        return false;
+        // v7.4.0 [2]: a missing Approve button is almost always a render/
+        // timing artefact, not a data problem. Retry rather than halt.
+        setStatus('⚠️ Approve control not readable yet — will retry this report.', 'warning');
+        return 'retry';
     }
 
     approveBtn.click();
     await sleep(CONFIG.SLEEP_POST_CLICK_MS);
+
+    // v7.3.0: buffering/loading screen may appear immediately after Approve
+    // is clicked (server round-trip) — pause and wait it out before
+    // continuing, rather than treating a not-yet-rendered popup as failure.
+    const approveClickReady = await waitForPageReady('post-approve-click load');
+    if (!approveClickReady) {
+        // v7.4.0 [2]: slow page ≠ validation failure. Retry this report.
+        return 'retry';
+    }
+
     // FIX D: wait for the PrimeNG popup to finish rendering
     await waitForDOMStable();
 
@@ -2935,9 +4197,7 @@ async function approveReport() {
         postClickWarnings.forEach(msg => {
             if (msg !== postClickFatal) setStatus(`🛑 ${msg}`, 'error');
         });
-        setStatus('🛑 Errors detected in the submitted data — stopping Autopilot.', 'error');
-        window.autopilotRunning = false;
-        updateUIButton();
+        haltForUser(`Errors detected in the submitted data: ${postClickFatal}`);
         return false;
     }
 
@@ -2978,14 +4238,22 @@ async function approveReport() {
     }
 
     if (!yesBtn) {
-        setStatus('❌ Modal submission dialogue confirmation button missing after all retry attempts.', 'error');
-        return false;
+        // v7.4.0 [2]: popup render-timing artefact — retry, do not halt.
+        setStatus('⚠️ Confirmation dialogue button not present yet — will retry this report.', 'warning');
+        return 'retry';
     }
 
     yesBtn.click();
 
     setStatus('Evaluating modal chain for trailing warnings...', 'info');
     await sleep(CONFIG.SLEEP_POST_DIALOG_MS);
+
+    // v7.3.0: submission confirm can itself trigger a buffering/loading
+    // screen while the server processes the report — wait it out.
+    const postYesReady = await waitForPageReady('post-confirmation load');
+    if (!postYesReady) {
+        return 'retry';
+    }
 
     // v7.1.2: hard-stop check — if the dialog reports actual data errors
     // (not just advisory warnings), halt Autopilot entirely. This check
@@ -2997,9 +4265,7 @@ async function approveReport() {
     });
     if (fatalMessage) {
         setStatus(`🛑 FATAL: ${fatalMessage}`, 'error');
-        setStatus('🛑 Errors detected in the submitted data — stopping Autopilot.', 'error');
-        window.autopilotRunning = false;
-        updateUIButton();
+        haltForUser(`Errors detected in the submitted data: ${fatalMessage}`);
         return false;
     }
 
@@ -3052,6 +4318,7 @@ async function approveReport() {
             });
 
             if (proceedBlocked) {
+                haltForUser('AIS distance discrepancy exceeds the lockout threshold — please verify the observed distance.');
                 return false;
             }
 
@@ -3063,6 +4330,7 @@ async function approveReport() {
                 unrecognized.forEach(msg => {
                     setStatus(`🛑 LOCKOUT: Unrecognized warning blocked auto-submission: "${msg}"`, 'error');
                 });
+                haltForUser(`Unrecognized warning blocked auto-submission: "${unrecognized[0]}"`);
                 return false;
             }
         } else if (!contextData.reportType.toLowerCase().includes('sea')) {
@@ -3074,6 +4342,7 @@ async function approveReport() {
             await sleep(CONFIG.SLEEP_POST_CLICK_MS);
         } else {
             setStatus('🛑 LOCKOUT: Observed Distance is 0 warning in AT SEA context! Halted.', 'error');
+            haltForUser('Observed Distance is 0 on an At Sea report — please review the distance value.');
             return false;
         }
     }
@@ -3167,8 +4436,62 @@ function extractDateFromSig(sig) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-async function goToNextPendingReport() {
+// v7.4.0 [3]: after clicking a card, confirm we actually landed on it before
+// letting the loop treat it as the current report. Retries the click when the
+// landing card does not match, so a mis-registered click can never cause a
+// report to be silently stepped over.
+async function verifyLandedOnCard(expectedSig, expectedCard) {
+    if (!expectedSig) return true;
+
+    for (let attempt = 1; attempt <= CONFIG.NAV_VERIFY_ATTEMPTS; attempt++) {
+        await waitForDOMStable();
+
+        const cards     = getAllReportCards();
+        const activeCard = identifyCurrentCard(cards);
+        const activeSig  = activeCard ? extractCardSignature(activeCard) : null;
+
+        if (activeSig && signaturesMatch(activeSig, expectedSig)) return true;
+
+        const pageText = document.body ? (document.body.innerText || '') : '';
+        if (expectedSig.vesselName && expectedSig.date &&
+            pageText.includes(expectedSig.vesselName) && pageText.includes(expectedSig.date)) {
+            return true;
+        }
+
+        setStatus(
+            `⚠️ Navigation check ${attempt}/${CONFIG.NAV_VERIFY_ATTEMPTS}: expected ` +
+            `${describeSignature(expectedSig)} but the page has not settled on it — re-clicking.`,
+            'warning'
+        );
+
+        const retryTarget =
+            cards.find(c => signaturesMatch(extractCardSignature(c), expectedSig)) || expectedCard;
+        if (retryTarget) retryTarget.click();
+        await sleep(CONFIG.NAV_VERIFY_DELAY_MS);
+    }
+
+    setStatus(
+        `⚠️ Navigation could not be confirmed for ${describeSignature(expectedSig)} — ` +
+        `it stays marked as pending in the ledger so it will not be lost.`,
+        'warning'
+    );
+    return false;
+}
+
+async function goToNextPendingReport(completedKey) {
     setStatus('Analyzing sidebar tracker matrix (sequential mode)...', 'info');
+
+    // v7.4.0 [3]: never step forward until the current report is recorded as
+    // finished. This is the guard that makes "processed exactly once" hold.
+    if (completedKey && !ledgerIsComplete(completedKey)) {
+        const entry = ProcessingLedger.entries.get(completedKey);
+        setStatus(
+            `⛔ Navigation blocked: the current report (${entry ? entry.label : completedKey}) is not marked ` +
+            `complete (status: ${entry ? entry.status : 'unknown'}). Autopilot will not move on until it is.`,
+            'error'
+        );
+        return 'blocked';
+    }
 
     const sidebarCards = queryAllContexts('.card, div[class*="card"]').filter(card => {
         const text = card.innerText || '';
@@ -3234,7 +4557,33 @@ async function goToNextPendingReport() {
         return false;
     }
 
-    const nextCard = sidebarCards[nextIndex];
+    let nextCard = sidebarCards[nextIndex];
+
+    // ── v7.4.0 [3] Ledger cross-check ──────────────────────────────────────
+    // If the ledger says a different (earlier, still-unprocessed) report
+    // should come next, prefer that card. This is what stops a report being
+    // stepped over when the sidebar re-orders mid-run.
+    if (completedKey) {
+        const expectedKey = ledgerNextExpectedKey(completedKey);
+        if (expectedKey) {
+            const stepKey = sigKey(extractCardSignature(nextCard));
+            if (stepKey !== expectedKey) {
+                const ledgerCard = sidebarCards.find(c => sigKey(extractCardSignature(c)) === expectedKey);
+                if (ledgerCard) {
+                    const entry = ProcessingLedger.entries.get(expectedKey);
+                    setStatus(
+                        `🧾 Ledger override: the next unprocessed report is ${entry ? entry.label : expectedKey}, ` +
+                        `not the card in the adjacent sidebar slot — navigating to the ledger target instead.`,
+                        'warning'
+                    );
+                    nextCard = ledgerCard;
+                }
+            }
+        } else if (ProcessingLedger.initialised) {
+            setStatus('🧾 Ledger: every queued report has been processed.', 'success');
+            return false;
+        }
+    }
 
     // ── Missing-date gap warning ───────────────────────────────────────────
     const currentSig = extractCardSignature(currentCard);
@@ -3264,9 +4613,22 @@ async function goToNextPendingReport() {
         setStatus('⚠️ DATE WARNING: Next report card has no readable date — cannot verify sequence continuity.', 'warning');
     }
 
-    setStatus('➡️ Moving to next report in sidebar sequence...', 'success');
+    setStatus(`➡️ Moving to next report: ${describeSignature(nextSig)}`, 'success');
     nextCard.click();
     await sleep(CONFIG.SLEEP_POST_NAVIGATE_MS);
+
+    // v7.3.0: the click may trigger a network fetch / buffering screen for
+    // the newly-selected report — wait it out instead of pressing on blind.
+    const navReady = await waitForPageReady('post-navigation load');
+    if (!navReady) {
+        // v7.4.0 [2]: a slow page after navigation is transient. Report it
+        // as a retry so the loop re-attempts rather than stopping the bot.
+        return 'retry';
+    }
+
+    // v7.4.0 [3]: confirm we actually landed where we intended.
+    await verifyLandedOnCard(nextSig, nextCard);
+
     return true;
 }
 
@@ -3310,103 +4672,197 @@ function isCurrentReportAlreadyRejected() {
     });
 }
 
+// v7.4.0 [3]: single place where the loop steps forward. Navigation only
+// happens once the finished report is recorded in the ledger.
+async function advanceToNextReport(completedKey) {
+    setStatus('━━━ Navigation phase: moving to next pending report ━━━', 'info');
+    const hasMore = await goToNextPendingReport(completedKey);
+
+    // 'blocked' means the current report is not finished — retry it rather
+    // than stepping over it or mistaking the block for an empty queue.
+    if (hasMore === 'blocked') return 'retry';
+    if (hasMore === 'retry')   return 'retry';
+    if (!hasMore) return 'complete';
+    return 'continue';
+}
+
+// Processes exactly one report and reports what should happen next.
+// Returns: 'continue' | 'retry' | 'halt' | 'complete'
+async function processOneReport() {
+    // v7.3.0: buffering/loading guard — pause and wait rather than erroring
+    // out if the site is still loading before we look at the report state.
+    const loopReady = await waitForPageReady('report queue check');
+    if (!loopReady) return 'retry';
+
+    // ── Ledger registration for the report currently on screen ──────────
+    const sidebarCards = getAllReportCards();
+    const currentCard  = identifyCurrentCard(sidebarCards);
+    const currentSig   = currentCard ? extractCardSignature(currentCard) : null;
+
+    if (!ProcessingLedger.initialised) {
+        initialiseLedger(sidebarCards, currentCard);
+    }
+
+    const entry = currentSig ? ledgerEnsureEntry(currentSig) : null;
+    const key   = entry ? entry.key : '';
+
+    if (entry && LEDGER_COMPLETE_STATUSES.includes(entry.status)) {
+        setStatus(`🧾 ${entry.label} is already recorded as "${entry.status}" — not re-processing it.`, 'info');
+        return await advanceToNextReport(key);
+    }
+    if (entry) ledgerMark(key, 'in-progress');
+
+    // ── Already-resolved reports ────────────────────────────────────────
+    if (isCurrentReportAlreadyApproved()) {
+        setStatus('⚠️ Current report already approved. Looking for next pending report...', 'warning');
+        // v7.2.0: capture lat/lon before navigating away so DR chain stays intact
+        const approvedPos = scrapeCurrentLatLon();
+        if (approvedPos) {
+            window._autopilotLastKnownPosition = approvedPos;
+            setStatus(`📍 Position captured from approved report: ${approvedPos.latRaw || decimalToDMS(approvedPos.lat, true)}, ${approvedPos.lonRaw || decimalToDMS(approvedPos.lon, false)}`, 'info');
+        }
+        ledgerMark(key, 'already-approved', 'was already approved when reached');
+        return await advanceToNextReport(key);
+    }
+
+    if (isCurrentReportAlreadyRejected()) {
+        setStatus('⚠️ Current report is already rejected — moving on (recorded in the ledger).', 'warning');
+        ledgerMark(key, 'already-rejected', 'was already rejected when reached');
+        return await advanceToNextReport(key);
+    }
+
+    // ── STEP 1: Capture current report context ──────────────────────────
+    setStatus('━━━ Context phase: capturing current report data ━━━', 'info');
+    const contextReady = await waitForPageReady('context capture');
+    if (!contextReady) return 'retry';
+
+    const crossReportData = await gatherCrossReportBunkerData();
+
+    // ── STEP 2: Validate — no navigation occurs inside here ──────────────
+    setStatus('━━━ Validation phase: running all checks on current report ━━━', 'info');
+    const isValid = await validateCurrentReport(crossReportData);
+
+    // v7.3.0/[5]: a duplicate is a recoverable validation RESULT. The report
+    // is rejected with an explanation, recorded, and the queue continues.
+    if (isValid === 'duplicate-skip') {
+        ledgerMark(key, 'rejected-duplicate', 'auto-rejected as a duplicate');
+        setStatus('━━━ Navigation phase: duplicate handled, continuing the queue ━━━', 'info');
+        return await advanceToNextReport(key);
+    }
+
+    if (!isValid) {
+        ledgerMark(key, 'halted-validation', AutopilotState.haltReason || 'validation issue');
+        return 'halt';
+    }
+
+    // ── STEP 3: Confirm we are still on the correct report ───────────────
+    if (crossReportData.currentSig) {
+        const onTarget = await ensureOnCurrentReport(
+            crossReportData.currentSig,
+            crossReportData.currentCard
+        );
+        if (onTarget === 'retry') return 'retry';
+        if (!onTarget) {
+            ledgerMark(key, 'halted-navigation', 'could not confirm the current report');
+            return 'halt';
+        }
+    }
+
+    // ── STEP 4: Approve the current report ───────────────────────────────
+    setStatus('━━━ Approval phase: submitting current report ━━━', 'info');
+    const approvalReady = await waitForPageReady('approval submission');
+    if (!approvalReady) return 'retry';
+
+    const approved = await approveReport();
+
+    if (approved === 'retry') return 'retry';
+    if (approved === false) {
+        ledgerMark(key, 'halted-approval', AutopilotState.haltReason || 'approval blocked');
+        return 'halt';
+    }
+
+    // ── STEP 4b: Verify the sidebar actually shows green/approved ────────
+    if (approved === true && crossReportData.currentSig) {
+        setStatus('━━━ Verification phase: confirming sidebar approval status ━━━', 'info');
+        const verified = await verifyApprovalAndRetry(
+            crossReportData.currentSig, crossReportData.currentCard
+        );
+        if (verified === 'retry') return 'retry';
+        if (!verified) {
+            ledgerMark(key, 'halted-verification', 'approval could not be confirmed');
+            return 'halt';
+        }
+    }
+
+    ledgerMark(key, approved === 'skipped' ? 'already-approved' : 'approved');
+
+    // ── STEP 5: Navigate to next pending report ──────────────────────────
+    return await advanceToNextReport(key);
+}
+
 async function runAutopilot() {
-    // v7.1.0: reset the stored position at the start of each fresh run so
-    // the first report's great-circle check starts from a clean slate.
-    window._autopilotLastKnownPosition = null;
+    // v7.4.0 [2]: only one loop may be active. The watchdog can call this
+    // again after an unexpected stop, so re-entry must be harmless.
+    if (AutopilotState.loopActive) return;
+    AutopilotState.loopActive = true;
+
     try {
         while (window.autopilotRunning) {
-            if (isCurrentReportAlreadyApproved()) {
-                setStatus('⚠️ Current report already approved. Looking for next pending report...', 'warning');
-                // v7.2.0: capture lat/lon before navigating away so DR chain stays intact
-                const approvedPos = scrapeCurrentLatLon();
-                if (approvedPos) {
-                    window._autopilotLastKnownPosition = approvedPos;
-                    setStatus(`📍 Position captured from approved report: ${approvedPos.latRaw || decimalToDMS(approvedPos.lat, true)}, ${approvedPos.lonRaw || decimalToDMS(approvedPos.lon, false)}`, 'info');
-                }
-                const hasNext = await goToNextPendingReport();
-                if (!hasNext) {
-                    window.autopilotRunning = false;
-                    updateUIButton();
+            let outcome;
+
+            try {
+                outcome = await processOneReport();
+            } catch (err) {
+                // v7.4.0 [2]: an unexpected exception is treated as transient.
+                // The bot retries instead of stopping on an internal glitch.
+                setStatus(`💥 Recoverable exception: ${err.message} — retrying.`, 'warning');
+                outcome = 'retry';
+            }
+
+            // Respect a Stop that arrived while the step was running.
+            if (AutopilotState.userStopped) break;
+
+            if (outcome === 'retry') {
+                AutopilotState.transientRetries++;
+
+                if (AutopilotState.transientRetries > CONFIG.MAX_TRANSIENT_RETRIES) {
+                    haltForUser(
+                        `No progress could be made on this report after ${CONFIG.MAX_TRANSIENT_RETRIES} ` +
+                        `automatic recovery attempts. Please check the page, then click Start.`
+                    );
+                    reportLedgerReconciliation();
                     break;
                 }
-                continue;
-            }
 
-            if (isCurrentReportAlreadyRejected()) {
-                setStatus('⚠️ Current report is already rejected — skipping to next report.', 'warning');
-                const hasNext = await goToNextPendingReport();
-                if (!hasNext) {
-                    window.autopilotRunning = false;
-                    updateUIButton();
-                    break;
-                }
-                continue;
-            }
-
-            // ── STEP 1: Capture current report context ──────────────────────
-            setStatus('━━━ Context phase: capturing current report data ━━━', 'info');
-            const crossReportData = await gatherCrossReportBunkerData();
-
-            // ── STEP 2: Validate — no navigation occurs inside here ───────────
-            setStatus('━━━ Validation phase: running all checks on current report ━━━', 'info');
-            const isValid = await validateCurrentReport(crossReportData);
-
-            if (!isValid) {
-                window.autopilotRunning = false;
-                updateUIButton();
-                break;
-            }
-
-            // ── STEP 3: Confirm we are still on the correct report ─────────────
-            if (crossReportData.currentSig) {
-                const onTarget = await ensureOnCurrentReport(
-                    crossReportData.currentSig,
-                    crossReportData.currentCard
+                setStatus(
+                    `♻️ Recovering (attempt ${AutopilotState.transientRetries}/${CONFIG.MAX_TRANSIENT_RETRIES}) — ` +
+                    `retrying the same report, not skipping it.`,
+                    'warning'
                 );
-                if (!onTarget) {
-                    setStatus('🛑 Pre-approval guard failed — could not confirm current report. Halting.', 'error');
-                    window.autopilotRunning = false;
-                    updateUIButton();
-                    break;
-                }
+                await sleep(CONFIG.TRANSIENT_RETRY_DELAY_MS);
+                continue;
             }
 
-            // ── STEP 4: Approve the current report ────────────────────────────
-            setStatus('━━━ Approval phase: submitting current report ━━━', 'info');
-            const approved = await approveReport();
+            AutopilotState.transientRetries = 0;
 
-            if (approved === false) {
-                window.autopilotRunning = false;
-                updateUIButton();
+            if (outcome === 'halt') {
+                if (!AutopilotState.genuineHalt) {
+                    haltForUser('A validation issue on this report needs review.');
+                }
+                reportLedgerReconciliation();
                 break;
             }
 
-            // ── STEP 4b: Verify the sidebar actually shows green/approved ─────
-            if (approved === true && crossReportData.currentSig) {
-                setStatus('━━━ Verification phase: confirming sidebar approval status ━━━', 'info');
-                const verified = await verifyApprovalAndRetry(crossReportData.currentSig, crossReportData.currentCard);
-                if (!verified) {
-                    window.autopilotRunning = false;
-                    updateUIButton();
-                    break;
-                }
-            }
-
-            // ── STEP 5: Navigate to next pending report ───────────────────────
-            setStatus('━━━ Navigation phase: moving to next pending report ━━━', 'info');
-            const hasMoreReports = await goToNextPendingReport();
-
-            if (!hasMoreReports) {
-                window.autopilotRunning = false;
-                updateUIButton();
+            if (outcome === 'complete') {
+                reportLedgerReconciliation();
+                finishRun('🎉 Queue complete — every report was validated and processed.');
                 break;
             }
+
+            // 'continue' → next report
         }
-    } catch (err) {
-        window.autopilotRunning = false;
-        updateUIButton();
-        setStatus(`💥 Operational Exception: ${err.message}`, 'error');
+    } finally {
+        AutopilotState.loopActive = false;
     }
 }
 
@@ -3445,7 +4901,7 @@ function injectControlPanel() {
 
     const headerTitle = document.createElement('span');
     headerTitle.style.cssText = 'color:#888; font-weight:bold;';
-    headerTitle.innerText = '🤖 SYSTEM ACTIVE LOG (v7.2.6):';
+    headerTitle.innerText = '🤖 SYSTEM ACTIVE LOG (v7.4.2):';
     headerBar.appendChild(headerTitle);
 
     const closeBtn = document.createElement('button');
@@ -3481,7 +4937,7 @@ function injectControlPanel() {
 
     const btn = document.createElement('button');
     btn.id = 'autopilot-btn';
-    btn.innerText = '▶ Start Autopilot (v7.2.6)';
+    btn.innerText = '▶ Start Autopilot (v7.4.2)';
     btn.style.cssText = `
         position: fixed; bottom: 20px; left: 20px; z-index: 99999;
         padding: 15px 25px; font-size: 16px; font-weight: bold;
@@ -3489,15 +4945,35 @@ function injectControlPanel() {
         border-radius: 5px; cursor: pointer; box-shadow: 0 4px 10px rgba(0,0,0,0.5);
     `;
 
+    // v7.4.0 [2]: strict Start/Stop semantics.
+    //   Stop  → sticky. Nothing in this file may restart the bot afterwards.
+    //   Start → the ONLY thing that clears a user stop or a genuine halt.
     btn.addEventListener('click', () => {
-        window.autopilotRunning = !window.autopilotRunning;
-        updateUIButton();
         if (window.autopilotRunning) {
-            statusBox.style.display = 'flex';
-            runAutopilot();
-        } else {
-            setStatus('⏹ Interrupted execution chain manually.', 'warning');
+            stopByUser();
+            return;
         }
+
+        statusBox.style.display = 'flex';
+
+        AutopilotState.userStopped      = false;
+        AutopilotState.genuineHalt      = false;
+        AutopilotState.haltReason       = '';
+        AutopilotState.sessionActive    = true;
+        AutopilotState.transientRetries = 0;
+
+        // v7.1.0: reset the stored position at the start of each fresh run so
+        // the first report's great-circle check starts from a clean slate.
+        window._autopilotLastKnownPosition = null;
+        resetLedger();
+        resetReportEventIndex();
+
+        window.autopilotRunning = true;
+        updateUIButton();
+        setStatus('▶️ Started by user.', 'success');
+
+        startWatchdog();
+        runAutopilot();
     });
 
     document.body.appendChild(btn);
@@ -3528,13 +5004,101 @@ function clearStatus() {
 function updateUIButton() {
     const btn = document.getElementById('autopilot-btn');
     if (!btn) return;
+
     if (window.autopilotRunning) {
         btn.innerText = '⏹ STOP Autopilot';
         btn.style.backgroundColor = '#c62828';
+        btn.title = 'Stop Autopilot. Once stopped it stays stopped until you click Start.';
+        return;
+    }
+
+    // v7.4.0 [2]: make the reason for a stop visible on the control itself.
+    if (AutopilotState.genuineHalt) {
+        btn.innerText = '▶ Start Autopilot — HALTED (v7.4.2)';
+        btn.style.backgroundColor = '#ef6c00';
+        btn.title = `Halted: ${AutopilotState.haltReason}`;
+    } else if (AutopilotState.userStopped) {
+        btn.innerText = '▶ Start Autopilot — stopped by user (v7.4.2)';
+        btn.style.backgroundColor = '#2e7d32';
+        btn.title = 'Stopped by you. Autopilot will not restart on its own.';
     } else {
-        btn.innerText = '▶ Start Autopilot (v7.2.6)';
+        btn.innerText = '▶ Start Autopilot (v7.4.2)';
+        btn.style.backgroundColor = '#2e7d32';
+        btn.title = '';
     }
 }
+
+// ---------------------------------------------------------------------------
+//   TEST HOOKS
+//
+//   Exposes the pure/verifiable functions so a jsdom harness can exercise
+//   them without driving the real UI. Has no effect on runtime behaviour.
+// ---------------------------------------------------------------------------
+
+window.__autopilotTestHooks = {
+    CONFIG,
+    AutopilotState,
+    ProcessingLedger,
+    ReportEventIndex,
+    // v7.4.2
+    isPageBuffering,
+    getLastBufferingReason,
+    waitForPageReady,
+    isElementVisible,
+    // Requirement [1]
+    getPurposeFuelConsumptionTotals,
+    normaliseColumnToken,
+    purposeForToken,
+    formatPurposeList,
+    isVesselAtSea,
+    getVesselStatusText,
+    evaluateBlankEventRows,
+    validatePortEvents,
+    // Requirement [2]
+    haltForUser,
+    stopByUser,
+    finishRun,
+    startWatchdog,
+    stopWatchdog,
+    // Requirement [3]
+    sigKey,
+    resetLedger,
+    initialiseLedger,
+    ledgerEnsureEntry,
+    ledgerMark,
+    ledgerIsComplete,
+    ledgerNextExpectedKey,
+    reportLedgerReconciliation,
+    goToNextPendingReport,
+    // Requirement [4]
+    scrapeBunkerSnapshot,
+    // Requirement [5]
+    signaturesMatch,
+    signaturesAreDuplicate,
+    checkIsDuplicateReport,
+    extractCardSignature,
+    // Requirements [6][7][9]
+    scrapeEventRows,
+    parseFlexibleDate,
+    eventDateTimeToTimestamp,
+    normaliseOffsetString,
+    // v7.4.1
+    cellLooksLikeLatLon,
+    cellLooksLikeDateTime,
+    locateDateTimeCells,
+    buildEventHeaderMap,
+    scrapeDateTimeCell,
+    validateEventEndDateTimes,
+    validateDepartureFinalEvent,
+    isDepartureReportContext,
+    recordAndCheckArrivalSeaEventConflicts,
+    resetReportEventIndex,
+    eventsAreSameOccurrence,
+    // Loop
+    validateCurrentReport,
+    processOneReport,
+    runAutopilot
+};
 
 injectControlPanel();
 
